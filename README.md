@@ -23,8 +23,10 @@ data.
 
 - Frameless strip, about 900 by 96 pixels, always on top; resize it wider to
   see more hours (the page scales its time window with width automatically).
-- Drag the clock row to move the window; invisible edge/corner handles resize
-  it (undecorated windows have no native borders on macOS/most Linux).
+- Hold the left mouse button on the timeline background or an event box to
+  move the window. Hover effects remain active, and interactive controls keep
+  their normal behavior. Invisible edge/corner handles resize the window
+  (undecorated windows have no native borders on macOS/most Linux).
 - A close button in the top-right corner closes the app.
 - Right-click anywhere in the strip for a settings menu: **Login** while
   logged out (or **Logged in as _username_** plus **Log out** while logged
@@ -92,6 +94,10 @@ Re-run that command to regenerate the full set after changing the logo.
   an event; the Rust side pops up a native menu at the cursor. "Go to
   Naphwiki.com" opens the default browser via `tauri-plugin-opener`, which is
   used only from Rust. The page gets no opener permission.
+- The same initialization script disables content selection and starts native
+  window dragging on left mouse presses outside links, form fields, buttons,
+  and resize handles. It does not add an overlay, so timeline hover effects
+  continue to receive normal pointer movement.
 - The menu's auth section expects `GET /api/me` to return a `user` object when
   logged in and a null `user` value when logged out. Failed, malformed, and
   timed out requests fall back to showing "Login". Menu login opens the same

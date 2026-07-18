@@ -16,15 +16,63 @@ const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimel
 const MAX_EVENT_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_CHARS: usize = 64;
 
-/// Suppresses the webview's built-in context menu, looks up the current auth
-/// state from the site (same-origin, so the session cookie is sent), and asks
-/// the Rust side to show the native settings menu.
+/// Adds native window behavior to the live timeline page. Content is not
+/// selectable, left mouse presses outside interactive controls drag the app
+/// window, and the built-in context menu is replaced by native settings.
 ///
-/// Site contract: `GET /api/me` returns an object with a `user` property. The
-/// property is null while logged out and contains the user object while logged
-/// in. Failed, malformed, and timed out requests use the logged-out menu.
-const CONTEXT_MENU_SCRIPT: &str = r#"
+/// The settings menu looks up the current auth state from the same-origin site,
+/// so the session cookie is sent. `GET /api/me` must return an object with a
+/// `user` property. The property is null while logged out and contains the user
+/// object while logged in. Failed, malformed, and timed out requests use the
+/// logged-out menu.
+const WINDOW_INTEGRATION_SCRIPT: &str = r#"
 (function () {
+  var DRAG_EXCLUSION_SELECTOR = [
+    'a',
+    'button',
+    'input',
+    'select',
+    'textarea',
+    'label',
+    '[contenteditable="true"]',
+    '[role="button"]',
+    '[role="link"]',
+    '[data-tauri-drag-region]',
+    '.embed-resize'
+  ].join(',');
+
+  function installSelectionStyles() {
+    if (document.getElementById('naphwiki-window-interaction-styles')) return;
+    var style = document.createElement('style');
+    style.id = 'naphwiki-window-interaction-styles';
+    style.textContent = [
+      'html, body, body * {',
+      '  -webkit-user-select: none !important;',
+      '  user-select: none !important;',
+      '}',
+      'input, textarea, [contenteditable="true"] {',
+      '  -webkit-user-select: text !important;',
+      '  user-select: text !important;',
+      '}'
+    ].join('\n');
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', installSelectionStyles, { once: true });
+  } else {
+    installSelectionStyles();
+  }
+
+  window.addEventListener('mousedown', function (e) {
+    if (e.button !== 0 || !window.__TAURI__) return;
+    var target = e.target instanceof Element ? e.target : null;
+    if (target && target.closest(DRAG_EXCLUSION_SELECTOR)) return;
+    e.preventDefault();
+    window.__TAURI__.window.getCurrentWindow().startDragging()
+      .catch(function () {});
+  }, true);
+
   async function authState() {
     var fallback = { loggedIn: false, username: null };
     var controller = new AbortController();
@@ -74,7 +122,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // The main window has `create: false` in tauri.conf.json so it can
-            // be built here with the context-menu init script attached.
+            // be built here with the window integration script attached.
             let window_config = app
                 .config()
                 .app
@@ -84,7 +132,7 @@ pub fn run() {
                 .expect("main window missing from tauri.conf.json")
                 .clone();
             let main = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
-                .initialization_script(CONTEXT_MENU_SCRIPT)
+                .initialization_script(WINDOW_INTEGRATION_SCRIPT)
                 .build()?;
 
             let handle = app.handle().clone();
