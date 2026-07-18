@@ -1,0 +1,25 @@
+# Rust build output
+/src-tauri/target/
+
+# Tauri generated files (can embed local paths)
+/src-tauri/gen/
+
+# Environment files and local credentials
+.env
+.env.*
+!.env.example
+.npmrc
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Editor and operating system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local logs
+*.log

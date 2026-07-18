@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "login-window",
+  "description": "Allow the Naphwiki login callback to close its own window",
+  "windows": ["discord-login"],
+  "remote": {
+    "urls": ["https://www.naphwiki.com"]
+  },
+  "local": true,
+  "permissions": ["core:window:allow-close"]
+}

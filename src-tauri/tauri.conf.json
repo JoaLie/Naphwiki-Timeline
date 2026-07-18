@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Naphwiki Timeline",
+  "version": "0.1.0",
+  "identifier": "com.naphwiki.timeline",
+  "build": {
+    "devUrl": "http://localhost:5173/timeline",
+    "frontendDist": "https://www.naphwiki.com/timeline"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Naphwiki Timeline",
+        "width": 900,
+        "height": 96,
+        "minWidth": 320,
+        "minHeight": 72,
+        "decorations": false,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "transparent": false,
+        "skipTaskbar": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
