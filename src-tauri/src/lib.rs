@@ -3,9 +3,7 @@ use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     AppHandle, Listener, Manager, WebviewUrl, WindowEvent, Wry,
 };
-use tauri_plugin_dialog::{
-    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
-};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -18,12 +16,14 @@ const MENU_LOGGED_IN_AS: &str = "logged-in-as";
 const MENU_ALWAYS_ON_TOP: &str = "always-on-top";
 const MENU_HIDE_WHEN_UNFOCUSED: &str = "hide-when-unfocused";
 const MENU_ATTACH_WINDOW: &str = "attach-window";
+#[cfg(windows)]
 const MENU_ATTACHED_PROCESS: &str = "attached-process";
 const MENU_OPEN_SITE: &str = "open-naphwiki";
 const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
 
 const SITE_URL: &str = "https://www.naphwiki.com";
 const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimeline";
+#[cfg(windows)]
 const DEFAULT_TARGET_PROCESS: &str = "Lineage II.exe";
 const MAX_EVENT_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_CHARS: usize = 64;
@@ -34,14 +34,21 @@ struct WindowTracking(Arc<Mutex<WindowTrackingSettings>>);
 struct WindowTrackingSettings {
     always_on_top: bool,
     hide_when_unfocused: bool,
+    #[cfg(windows)]
     preferred_process: String,
+    #[cfg(windows)]
     attached_process: Option<String>,
+    #[cfg(windows)]
     target: Option<AttachedWindow>,
+    #[cfg(windows)]
     selection_prompt_open: bool,
+    #[cfg(windows)]
     selection_armed: bool,
+    #[cfg(windows)]
     actual_topmost: Option<bool>,
 }
 
+#[cfg(windows)]
 struct AttachedWindow {
     handle: isize,
     process_id: u32,
@@ -55,11 +62,17 @@ impl Default for WindowTracking {
         Self(Arc::new(Mutex::new(WindowTrackingSettings {
             always_on_top: true,
             hide_when_unfocused: true,
+            #[cfg(windows)]
             preferred_process: DEFAULT_TARGET_PROCESS.to_string(),
+            #[cfg(windows)]
             attached_process: None,
+            #[cfg(windows)]
             target: None,
+            #[cfg(windows)]
             selection_prompt_open: false,
+            #[cfg(windows)]
             selection_armed: false,
+            #[cfg(windows)]
             actual_topmost: None,
         })))
     }
@@ -266,7 +279,7 @@ async fn check_for_updates(app: AppHandle) {
         .buttons(MessageDialogButtons::YesNo)
         .blocking_show();
 
-    if response != MessageDialogResult::Yes {
+    if !response {
         return;
     }
 
@@ -291,10 +304,11 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
         return;
     };
     let tracking = app.state::<WindowTracking>();
-    let (on_top, hide_when_unfocused, tracking_status) = {
+    let on_top = tracking.lock().always_on_top;
+    #[cfg(windows)]
+    let (hide_when_unfocused, tracking_status) = {
         let settings = tracking.lock();
         (
-            settings.always_on_top,
             settings.hide_when_unfocused,
             tracking_status_label(&settings),
         )
@@ -382,6 +396,7 @@ fn toggle_always_on_top(app: &AppHandle) {
     let always_on_top = {
         let mut settings = tracking.lock();
         settings.always_on_top = !settings.always_on_top;
+        #[cfg(windows)]
         settings.actual_topmost = None;
         settings.always_on_top
     };
@@ -399,6 +414,7 @@ fn toggle_hide_when_unfocused(app: &AppHandle) {
     let tracking = app.state::<WindowTracking>();
     let mut settings = tracking.lock();
     settings.hide_when_unfocused = !settings.hide_when_unfocused;
+    #[cfg(windows)]
     settings.actual_topmost = None;
 }
 
@@ -417,6 +433,7 @@ fn request_window_selection(app: &AppHandle) {
     let _ = app;
 }
 
+#[cfg(windows)]
 fn tracking_status_label(settings: &WindowTrackingSettings) -> String {
     if settings.selection_prompt_open {
         return "Choose a window in the open prompt".to_string();
