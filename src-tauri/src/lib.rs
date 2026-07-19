@@ -1,20 +1,75 @@
+use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     AppHandle, Listener, Manager, WebviewUrl, WindowEvent, Wry,
 };
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
+
+#[cfg(windows)]
+mod window_tracking;
 
 const MENU_LOGIN: &str = "login";
 const MENU_LOGOUT: &str = "logout";
 const MENU_LOGGED_IN_AS: &str = "logged-in-as";
 const MENU_ALWAYS_ON_TOP: &str = "always-on-top";
+const MENU_HIDE_WHEN_UNFOCUSED: &str = "hide-when-unfocused";
+const MENU_ATTACH_WINDOW: &str = "attach-window";
+const MENU_ATTACHED_PROCESS: &str = "attached-process";
 const MENU_OPEN_SITE: &str = "open-naphwiki";
 const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
 
 const SITE_URL: &str = "https://www.naphwiki.com";
 const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimeline";
+const DEFAULT_TARGET_PROCESS: &str = "Lineage II.exe";
 const MAX_EVENT_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_CHARS: usize = 64;
+
+#[derive(Clone)]
+struct WindowTracking(Arc<Mutex<WindowTrackingSettings>>);
+
+struct WindowTrackingSettings {
+    always_on_top: bool,
+    hide_when_unfocused: bool,
+    preferred_process: String,
+    attached_process: Option<String>,
+    target: Option<AttachedWindow>,
+    selection_prompt_open: bool,
+    selection_armed: bool,
+    actual_topmost: Option<bool>,
+}
+
+struct AttachedWindow {
+    handle: isize,
+    process_id: u32,
+    offset: (i32, i32),
+    last_target_position: (i32, i32),
+    last_overlay_position: (i32, i32),
+}
+
+impl Default for WindowTracking {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(WindowTrackingSettings {
+            always_on_top: true,
+            hide_when_unfocused: true,
+            preferred_process: DEFAULT_TARGET_PROCESS.to_string(),
+            attached_process: None,
+            target: None,
+            selection_prompt_open: false,
+            selection_armed: false,
+            actual_topmost: None,
+        })))
+    }
+}
+
+impl WindowTracking {
+    fn lock(&self) -> MutexGuard<'_, WindowTrackingSettings> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
 
 /// Adds native window behavior to the live timeline page. Content is not
 /// selectable, left mouse presses outside interactive controls drag the app
@@ -119,7 +174,10 @@ struct AuthState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(WindowTracking::default())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // The main window has `create: false` in tauri.conf.json so it can
             // be built here with the window integration script attached.
@@ -135,6 +193,15 @@ pub fn run() {
                 .initialization_script(WINDOW_INTEGRATION_SCRIPT)
                 .build()?;
 
+            #[cfg(windows)]
+            {
+                let native_window = main.hwnd()?.0 as isize;
+                window_tracking::start(
+                    native_window,
+                    app.state::<WindowTracking>().inner().clone(),
+                );
+            }
+
             let handle = app.handle().clone();
             main.listen(CONTEXT_MENU_EVENT, move |event| {
                 let auth = if event.payload().len() <= MAX_EVENT_PAYLOAD_BYTES {
@@ -146,6 +213,11 @@ pub fn run() {
                 let main_thread_handle = handle.clone();
                 let _ = handle
                     .run_on_main_thread(move || show_context_menu(&main_thread_handle, &auth));
+            });
+
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                check_for_updates(update_handle).await;
             });
             Ok(())
         })
@@ -162,13 +234,9 @@ pub fn run() {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_LOGIN => open_login_window(app),
             MENU_LOGOUT => log_out(app),
-            MENU_ALWAYS_ON_TOP => {
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Ok(on_top) = window.is_always_on_top() {
-                        let _ = window.set_always_on_top(!on_top);
-                    }
-                }
-            }
+            MENU_ALWAYS_ON_TOP => toggle_always_on_top(app),
+            MENU_HIDE_WHEN_UNFOCUSED => toggle_hide_when_unfocused(app),
+            MENU_ATTACH_WINDOW => request_window_selection(app),
             MENU_OPEN_SITE => {
                 let _ = app.opener().open_url(SITE_URL, None::<&str>);
             }
@@ -178,11 +246,59 @@ pub fn run() {
         .expect("error while running naphwiki timeline");
 }
 
+async fn check_for_updates(app: AppHandle) {
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(_) => return,
+    };
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) | Err(_) => return,
+    };
+    let version = update.version.clone();
+    let response = app
+        .dialog()
+        .message(format!(
+            "Naphwiki Timeline {version} is available.\n\nDownload and install it now?"
+        ))
+        .title("Update available")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::YesNo)
+        .blocking_show();
+
+    if response != MessageDialogResult::Yes {
+        return;
+    }
+
+    if update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .is_err()
+    {
+        app.dialog()
+            .message("The update could not be downloaded or installed. Please try again later.")
+            .title("Update failed")
+            .kind(MessageDialogKind::Error)
+            .blocking_show();
+        return;
+    }
+
+    app.restart();
+}
+
 fn show_context_menu(app: &AppHandle, auth: &AuthState) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let on_top = window.is_always_on_top().unwrap_or(false);
+    let tracking = app.state::<WindowTracking>();
+    let (on_top, hide_when_unfocused, tracking_status) = {
+        let settings = tracking.lock();
+        (
+            settings.always_on_top,
+            settings.hide_when_unfocused,
+            tracking_status_label(&settings),
+        )
+    };
     let menu = (|| -> tauri::Result<Menu<Wry>> {
         let menu = Menu::new(app)?;
         if auth.logged_in {
@@ -214,6 +330,31 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
             )?)?;
         }
         menu.append(&PredefinedMenuItem::separator(app)?)?;
+        #[cfg(windows)]
+        {
+            menu.append(&MenuItem::with_id(
+                app,
+                MENU_ATTACH_WINDOW,
+                "Attach to window",
+                true,
+                None::<&str>,
+            )?)?;
+            menu.append(&MenuItem::with_id(
+                app,
+                MENU_ATTACHED_PROCESS,
+                tracking_status,
+                false,
+                None::<&str>,
+            )?)?;
+            menu.append(&CheckMenuItem::with_id(
+                app,
+                MENU_HIDE_WHEN_UNFOCUSED,
+                "Hide when game is not in focus",
+                true,
+                hide_when_unfocused,
+                None::<&str>,
+            )?)?;
+        }
         menu.append(&CheckMenuItem::with_id(
             app,
             MENU_ALWAYS_ON_TOP,
@@ -234,6 +375,67 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
     if let Ok(menu) = menu {
         let _ = window.popup_menu(&menu);
     }
+}
+
+fn toggle_always_on_top(app: &AppHandle) {
+    let tracking = app.state::<WindowTracking>();
+    let always_on_top = {
+        let mut settings = tracking.lock();
+        settings.always_on_top = !settings.always_on_top;
+        settings.actual_topmost = None;
+        settings.always_on_top
+    };
+
+    #[cfg(not(windows))]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_always_on_top(always_on_top);
+    }
+
+    #[cfg(windows)]
+    let _ = always_on_top;
+}
+
+fn toggle_hide_when_unfocused(app: &AppHandle) {
+    let tracking = app.state::<WindowTracking>();
+    let mut settings = tracking.lock();
+    settings.hide_when_unfocused = !settings.hide_when_unfocused;
+    settings.actual_topmost = None;
+}
+
+fn request_window_selection(app: &AppHandle) {
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(native_window) = window.hwnd() {
+            window_tracking::request_selection(
+                native_window.0 as isize,
+                app.state::<WindowTracking>().inner().clone(),
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
+fn tracking_status_label(settings: &WindowTrackingSettings) -> String {
+    if settings.selection_prompt_open {
+        return "Choose a window in the open prompt".to_string();
+    }
+    if settings.selection_armed {
+        return "Click a window to attach".to_string();
+    }
+    match settings.attached_process.as_deref() {
+        Some(process) => format!("Attached to: {process}"),
+        None => format!("Looking for: {}", settings.preferred_process),
+    }
+}
+
+fn effective_topmost(
+    always_on_top: bool,
+    hide_when_unfocused: bool,
+    target_is_focused: bool,
+) -> bool {
+    always_on_top && (!hide_when_unfocused || target_is_focused)
 }
 
 /// Opens the same decorated Discord login popup the strip's own hover button
@@ -279,7 +481,7 @@ fn normalized_username(username: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_username, MAX_USERNAME_CHARS};
+    use super::{effective_topmost, normalized_username, MAX_USERNAME_CHARS};
 
     #[test]
     fn username_is_trimmed_and_control_characters_are_removed() {
@@ -302,5 +504,14 @@ mod tests {
             normalized_username(Some(&username)),
             Some("a".repeat(MAX_USERNAME_CHARS))
         );
+    }
+
+    #[test]
+    fn focus_setting_only_suppresses_always_on_top_while_unfocused() {
+        assert!(effective_topmost(true, true, true));
+        assert!(!effective_topmost(true, true, false));
+        assert!(effective_topmost(true, false, false));
+        assert!(!effective_topmost(false, false, true));
+        assert!(!effective_topmost(false, true, true));
     }
 }

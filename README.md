@@ -30,8 +30,22 @@ data.
 - A close button in the top-right corner closes the app.
 - Right-click anywhere in the strip for a settings menu: **Login** while
   logged out (or **Logged in as _username_** plus **Log out** while logged
-  in), toggle **Always on Top**, or **Go to Naphwiki.com** to open the full
-  site in your default browser.
+  in), attach the strip to another window, toggle focus-aware topmost behavior,
+  toggle **Always on Top**, or **Go to Naphwiki.com** to open the full site in
+  your default browser.
+- On Windows, the strip automatically looks for `Lineage II.exe` and keeps its
+  current offset when the game window moves. Moving or resizing the strip still
+  works normally; a manual move becomes the new tracked offset.
+- **Hide when game is not in focus** is enabled by default. It temporarily
+  removes the strip's topmost status while the attached application is not
+  focused, then restores the user's **Always on Top** preference when focus
+  returns.
+- **Attach to window** starts manual selection. After dismissing the prompt,
+  click any application window to track it instead. The settings menu shows the
+  attached process name, or the process currently being searched for.
+- Checks for a new release when the app starts. Available updates are shown in
+  a native confirmation dialog and are downloaded and installed only after the
+  user agrees.
 - Optional Discord login (hover-reveal button, top-left, while logged out):
   opens a normal-sized login window, and your customized timeline (hidden
   events, custom events, notification settings) loads into the strip once it
@@ -46,7 +60,9 @@ Grab the bundle for your platform from the
 - **macOS**: `.dmg`
 - **Linux**: `.deb`, `.rpm`, or AppImage
 
-Builds are currently unsigned, so your OS may show a warning on first launch.
+Builds are currently unsigned by the operating-system vendors, so your OS may
+show a warning on first launch. Update packages have a separate Tauri signature
+that the installed app verifies before installation.
 
 ## Development
 
@@ -127,6 +143,10 @@ Re-run that command to regenerate the full set after changing the logo.
   connection; offline it shows a blank window (v1).
 - On Wayland, resize-dragging and always-on-top depend on the compositor.
   X11, Windows, and macOS are fine.
+- Window attachment is currently available on Windows. Like other desktop
+  overlays, it is intended for windowed or borderless-windowed games; exclusive
+  fullscreen applications can prevent other windows from being displayed over
+  them.
 
 ## License
 
