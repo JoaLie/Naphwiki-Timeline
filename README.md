@@ -26,7 +26,7 @@ data.
 - Hold the left mouse button on the timeline background or an event box to
   move the window. Hover effects remain active, and interactive controls keep
   their normal behavior. Invisible edge/corner handles resize the window
-  (undecorated windows have no native borders on macOS/most Linux).
+  without requiring native window borders.
 - A close button in the top-right corner closes the app.
 - Right-click anywhere in the strip for a settings menu: **Login** while
   logged out (or **Logged in as _username_** plus **Log out** while logged
@@ -53,12 +53,9 @@ data.
 
 ## Install
 
-Grab the bundle for your platform from the
-[Releases](../../releases) page:
+Grab the Windows bundle from the [Releases](../../releases) page:
 
 - **Windows**: `.msi` or NSIS `.exe`
-- **macOS**: `.dmg`
-- **Linux**: `.deb`, `.rpm`, or AppImage
 
 Builds are currently unsigned by the operating-system vendors, so your OS may
 show a warning on first launch. Update packages have a separate Tauri signature
@@ -70,9 +67,7 @@ Prerequisites:
 
 - Rust stable - <https://rustup.rs>
 - Tauri CLI: `cargo install tauri-cli --version "^2"`
-- Platform webview deps: WebView2 on Windows (usually preinstalled),
-  `libwebkit2gtk-4.1-dev` (plus `libgtk-3-dev`, `librsvg2-dev`,
-  `libayatana-appindicator3-dev` as needed) on Linux, nothing extra on macOS.
+- WebView2 on Windows, which is normally preinstalled.
 
 Two ways to run during development:
 
@@ -141,12 +136,9 @@ Re-run that command to regenerate the full set after changing the logo.
   machine only.
 - The app shows the live site, so it needs the site deployed and a network
   connection; offline it shows a blank window (v1).
-- On Wayland, resize-dragging and always-on-top depend on the compositor.
-  X11, Windows, and macOS are fine.
-- Window attachment is currently available on Windows. Like other desktop
-  overlays, it is intended for windowed or borderless-windowed games; exclusive
-  fullscreen applications can prevent other windows from being displayed over
-  them.
+- Like other desktop overlays, window attachment is intended for windowed or
+  borderless-windowed games; exclusive fullscreen applications can prevent
+  other windows from being displayed over them.
 
 ## License
 

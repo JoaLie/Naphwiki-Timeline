@@ -283,11 +283,7 @@ async fn check_for_updates(app: AppHandle) {
         return;
     }
 
-    if update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .is_err()
-    {
+    if update.download_and_install(|_, _| {}, || {}).await.is_err() {
         app.dialog()
             .message("The update could not be downloaded or installed. Please try again later.")
             .title("Update failed")
@@ -397,7 +393,9 @@ fn toggle_always_on_top(app: &AppHandle) {
         let mut settings = tracking.lock();
         settings.always_on_top = !settings.always_on_top;
         #[cfg(windows)]
-        settings.actual_topmost = None;
+        {
+            settings.actual_topmost = None;
+        }
         settings.always_on_top
     };
 
@@ -415,7 +413,9 @@ fn toggle_hide_when_unfocused(app: &AppHandle) {
     let mut settings = tracking.lock();
     settings.hide_when_unfocused = !settings.hide_when_unfocused;
     #[cfg(windows)]
-    settings.actual_topmost = None;
+    {
+        settings.actual_topmost = None;
+    }
 }
 
 fn request_window_selection(app: &AppHandle) {
@@ -447,6 +447,7 @@ fn tracking_status_label(settings: &WindowTrackingSettings) -> String {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn effective_topmost(
     always_on_top: bool,
     hide_when_unfocused: bool,

@@ -64,12 +64,7 @@ extern "system" {
     #[link_name = "IsWindowVisible"]
     fn is_window_visible(window: NativeWindow) -> i32;
     #[link_name = "MessageBoxW"]
-    fn message_box(
-        owner: NativeWindow,
-        text: *const u16,
-        caption: *const u16,
-        kind: u32,
-    ) -> i32;
+    fn message_box(owner: NativeWindow, text: *const u16, caption: *const u16, kind: u32) -> i32;
     #[link_name = "SetWindowPos"]
     fn set_window_position(
         window: NativeWindow,
@@ -155,11 +150,7 @@ pub(super) fn request_selection(own_window: isize, tracking: WindowTracking) {
         });
 }
 
-fn select_foreground_window(
-    own_window: isize,
-    own_process_id: u32,
-    tracking: &WindowTracking,
-) {
+fn select_foreground_window(own_window: isize, own_process_id: u32, tracking: &WindowTracking) {
     if !tracking.lock().selection_armed {
         return;
     }
@@ -238,7 +229,10 @@ fn attach(
         return;
     };
 
-    let offset = (own_rect.left - target_rect.left, own_rect.top - target_rect.top);
+    let offset = (
+        own_rect.left - target_rect.left,
+        own_rect.top - target_rect.top,
+    );
     settings.preferred_process = candidate.process_name.clone();
     settings.attached_process = Some(candidate.process_name.clone());
     settings.target = Some(super::AttachedWindow {
@@ -264,8 +258,7 @@ fn update_tracked_position(own_window: isize, tracking: &WindowTracking) {
     let Some(target) = target else {
         return;
     };
-    let (handle, process_id, offset, last_target_position, last_overlay_position) =
-        target;
+    let (handle, process_id, offset, last_target_position, last_overlay_position) = target;
     if unsafe { is_iconic(native_window(handle)) } != 0 {
         return;
     }
@@ -279,32 +272,28 @@ fn update_tracked_position(own_window: isize, tracking: &WindowTracking) {
     let target_position = (target_rect.left, target_rect.top);
     let own_position = (own_rect.left, own_rect.top);
 
-    let (new_offset, new_target_position, new_overlay_position) = if target_position
-        != last_target_position
-    {
-        let desired_position = (
-            target_position.0 + offset.0,
-            target_position.1 + offset.1,
-        );
-        if own_position == desired_position
-            || move_window(own_window, desired_position.0, desired_position.1)
-        {
-            (offset, target_position, desired_position)
-        } else {
-            (offset, last_target_position, last_overlay_position)
-        }
-    } else if own_position != last_overlay_position {
-        (
+    let (new_offset, new_target_position, new_overlay_position) =
+        if target_position != last_target_position {
+            let desired_position = (target_position.0 + offset.0, target_position.1 + offset.1);
+            if own_position == desired_position
+                || move_window(own_window, desired_position.0, desired_position.1)
+            {
+                (offset, target_position, desired_position)
+            } else {
+                (offset, last_target_position, last_overlay_position)
+            }
+        } else if own_position != last_overlay_position {
             (
-                own_position.0 - target_position.0,
-                own_position.1 - target_position.1,
-            ),
-            target_position,
-            own_position,
-        )
-    } else {
-        (offset, target_position, own_position)
-    };
+                (
+                    own_position.0 - target_position.0,
+                    own_position.1 - target_position.1,
+                ),
+                target_position,
+                own_position,
+            )
+        } else {
+            (offset, target_position, own_position)
+        };
 
     let mut settings = tracking.lock();
     if let Some(target) = settings
@@ -334,11 +323,8 @@ fn update_topmost(own_window: isize, tracking: &WindowTracking) {
     let target_is_focused = target.is_some_and(|(handle, process_id)| {
         !is_minimized(handle) && foreground_process_id() == Some(process_id)
     });
-    let should_be_topmost = effective_topmost(
-        always_on_top,
-        hide_when_unfocused,
-        target_is_focused,
-    );
+    let should_be_topmost =
+        effective_topmost(always_on_top, hide_when_unfocused, target_is_focused);
     if actual_topmost == Some(should_be_topmost) {
         return;
     }
@@ -410,9 +396,8 @@ fn process_name(process_id: u32) -> Option<String> {
 
     let mut path = vec![0_u16; 32_768];
     let mut length = path.len() as u32;
-    let succeeded = unsafe {
-        query_full_process_image_name(process, 0, path.as_mut_ptr(), &mut length) != 0
-    };
+    let succeeded =
+        unsafe { query_full_process_image_name(process, 0, path.as_mut_ptr(), &mut length) != 0 };
     unsafe {
         close_handle(process);
     }
