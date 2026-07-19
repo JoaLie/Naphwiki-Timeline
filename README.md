@@ -15,9 +15,9 @@ for content changes.
 
 This is a shell that loads the public website. It contains **no bundled
 credentials or private infrastructure**. Authentication is handled by the
-public website. The app stores no data of its own beyond the webview's regular
-cookies and local storage, which are kept in your OS user profile like browser
-data.
+public website. The app stores the remembered target process and relative
+window offset in the OS user profile. The webview's regular cookies and local
+storage are kept there as well, like browser data.
 
 ## Features
 
@@ -31,11 +31,12 @@ data.
 - Right-click anywhere in the strip for a settings menu: **Login** while
   logged out (or **Logged in as _username_** plus **Log out** while logged
   in), attach the strip to another window, toggle focus-aware topmost behavior,
-  toggle **Always on Top**, or **Go to Naphwiki.com** to open the full site in
-  your default browser.
-- On Windows, the strip automatically looks for `Lineage II.exe` and keeps its
-  current offset when the game window moves. Moving or resizing the strip still
-  works normally; a manual move becomes the new tracked offset.
+  configure Windows startup, toggle **Always on Top**, or **Go to
+  Naphwiki.com** to open the full site in your default browser.
+- On Windows, the strip automatically looks for `L2.bin` and keeps its current
+  offset when the game window moves. Moving or resizing the strip still works
+  normally; a manual move becomes the new tracked offset, and that offset is
+  restored the next time the same process is attached.
 - **Hide when game is not in focus** is enabled by default. It temporarily
   removes the strip's topmost status while the attached application is not
   focused, then restores the user's **Always on Top** preference when focus
@@ -43,6 +44,10 @@ data.
 - **Attach to window** starts manual selection. After dismissing the prompt,
   click any application window to track it instead. The settings menu shows the
   attached process name, or the process currently being searched for.
+- **Start with Windows** launches one hidden background instance when you sign
+  in. It waits for the remembered game process, shows and positions the strip
+  when the game opens, and hides it again when the game closes. Opening the app
+  manually reveals the existing instance instead of creating a duplicate.
 - Checks for a new release when the app starts. Available updates are shown in
   a native confirmation dialog and are downloaded and installed only after the
   user agrees.

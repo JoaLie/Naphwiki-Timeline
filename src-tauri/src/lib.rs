@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
@@ -6,6 +8,11 @@ use tauri::{
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
+#[cfg(windows)]
+use winreg::{
+    enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_BINARY},
+    RegKey, RegValue,
+};
 
 #[cfg(windows)]
 mod window_tracking;
@@ -18,13 +25,30 @@ const MENU_HIDE_WHEN_UNFOCUSED: &str = "hide-when-unfocused";
 const MENU_ATTACH_WINDOW: &str = "attach-window";
 #[cfg(windows)]
 const MENU_ATTACHED_PROCESS: &str = "attached-process";
+#[cfg(windows)]
+const MENU_START_WITH_WINDOWS: &str = "start-with-windows";
 const MENU_OPEN_SITE: &str = "open-naphwiki";
 const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
 
 const SITE_URL: &str = "https://www.naphwiki.com";
 const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimeline";
 #[cfg(windows)]
-const DEFAULT_TARGET_PROCESS: &str = "Lineage II.exe";
+const DEFAULT_TARGET_PROCESS: &str = "L2.bin";
+#[cfg(windows)]
+const AUTOSTART_ARGUMENT: &str = "--autostart";
+#[cfg(windows)]
+const TRACKING_SETTINGS_FILE: &str = "window-tracking.json";
+#[cfg(windows)]
+const MAX_TRACKING_SETTINGS_BYTES: u64 = 4 * 1024;
+#[cfg(windows)]
+const WINDOWS_RUN_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
+#[cfg(windows)]
+const WINDOWS_STARTUP_APPROVED_KEY: &str =
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+#[cfg(windows)]
+const WINDOWS_STARTUP_VALUE: &str = "Naphwiki Timeline";
+#[cfg(windows)]
+const WINDOWS_STARTUP_ENABLED: [u8; 12] = [0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const MAX_EVENT_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_CHARS: usize = 64;
 
@@ -46,6 +70,12 @@ struct WindowTrackingSettings {
     selection_armed: bool,
     #[cfg(windows)]
     actual_topmost: Option<bool>,
+    #[cfg(windows)]
+    remembered_offset: Option<(i32, i32)>,
+    #[cfg(windows)]
+    persistence_path: Option<PathBuf>,
+    #[cfg(windows)]
+    background_mode: bool,
 }
 
 #[cfg(windows)]
@@ -74,6 +104,12 @@ impl Default for WindowTracking {
             selection_armed: false,
             #[cfg(windows)]
             actual_topmost: None,
+            #[cfg(windows)]
+            remembered_offset: None,
+            #[cfg(windows)]
+            persistence_path: None,
+            #[cfg(windows)]
+            background_mode: false,
         })))
     }
 }
@@ -82,6 +118,136 @@ impl WindowTracking {
     fn lock(&self) -> MutexGuard<'_, WindowTrackingSettings> {
         self.0.lock().unwrap_or_else(|error| error.into_inner())
     }
+
+    #[cfg(windows)]
+    fn configure(&self, persistence_path: Option<PathBuf>, background_mode: bool) {
+        let persisted = persistence_path.as_deref().and_then(load_tracking_settings);
+        let mut settings = self.lock();
+        if let Some(persisted) = persisted {
+            if is_valid_process_name(&persisted.preferred_process) {
+                settings.preferred_process = persisted.preferred_process;
+            }
+            settings.remembered_offset = persisted.offset.map(|offset| (offset[0], offset[1]));
+        }
+        settings.persistence_path = persistence_path;
+        settings.background_mode = background_mode;
+    }
+}
+
+#[cfg(windows)]
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistedWindowTracking {
+    preferred_process: String,
+    offset: Option<[i32; 2]>,
+}
+
+#[cfg(windows)]
+fn load_tracking_settings(path: &Path) -> Option<PersistedWindowTracking> {
+    if std::fs::metadata(path).ok()?.len() > MAX_TRACKING_SETTINGS_BYTES {
+        return None;
+    }
+    let contents = std::fs::read(path).ok()?;
+    serde_json::from_slice(&contents).ok()
+}
+
+#[cfg(windows)]
+fn persist_tracking_settings(settings: &WindowTrackingSettings) {
+    let Some(path) = settings.persistence_path.as_deref() else {
+        return;
+    };
+    let persisted = PersistedWindowTracking {
+        preferred_process: settings.preferred_process.clone(),
+        offset: settings.remembered_offset.map(|(x, y)| [x, y]),
+    };
+    let Ok(contents) = serde_json::to_vec_pretty(&persisted) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let _ = std::fs::write(path, contents);
+}
+
+#[cfg(windows)]
+fn is_valid_process_name(process: &str) -> bool {
+    !process.trim().is_empty()
+        && process.len() <= 260
+        && !process.chars().any(|character| character.is_control())
+}
+
+#[cfg(windows)]
+fn launched_by_autostart() -> bool {
+    std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARGUMENT))
+}
+
+#[cfg(windows)]
+fn windows_startup_command() -> std::io::Result<String> {
+    let executable = std::env::current_exe()?;
+    Ok(format!(
+        "\"{}\" {}",
+        executable.display(),
+        AUTOSTART_ARGUMENT
+    ))
+}
+
+#[cfg(windows)]
+fn windows_startup_enabled() -> std::io::Result<bool> {
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = current_user.open_subkey_with_flags(WINDOWS_RUN_KEY, KEY_READ)?;
+    let registered_command = run_key.get_value::<String, _>(WINDOWS_STARTUP_VALUE).ok();
+    let expected_command = windows_startup_command()?;
+    if registered_command.as_deref() != Some(expected_command.as_str()) {
+        return Ok(false);
+    }
+
+    let task_manager_enabled = current_user
+        .open_subkey_with_flags(WINDOWS_STARTUP_APPROVED_KEY, KEY_READ)
+        .ok()
+        .and_then(|key| key.get_raw_value(WINDOWS_STARTUP_VALUE).ok())
+        .and_then(|value| {
+            (value.bytes.len() >= 8)
+                .then(|| value.bytes.iter().rev().take(8).all(|byte| *byte == 0))
+        })
+        .unwrap_or(true);
+    Ok(task_manager_enabled)
+}
+
+#[cfg(windows)]
+fn set_windows_startup(enabled: bool) -> std::io::Result<()> {
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = current_user.open_subkey_with_flags(WINDOWS_RUN_KEY, KEY_SET_VALUE)?;
+    if enabled {
+        run_key.set_value(WINDOWS_STARTUP_VALUE, &windows_startup_command()?)?;
+        if let Ok(startup_approved) =
+            current_user.open_subkey_with_flags(WINDOWS_STARTUP_APPROVED_KEY, KEY_SET_VALUE)
+        {
+            startup_approved.set_raw_value(
+                WINDOWS_STARTUP_VALUE,
+                &RegValue {
+                    vtype: REG_BINARY,
+                    bytes: WINDOWS_STARTUP_ENABLED.to_vec(),
+                },
+            )?;
+        }
+    } else {
+        match run_key.delete_value(WINDOWS_STARTUP_VALUE) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if let Ok(startup_approved) =
+            current_user.open_subkey_with_flags(WINDOWS_STARTUP_APPROVED_KEY, KEY_SET_VALUE)
+        {
+            match startup_approved.delete_value(WINDOWS_STARTUP_VALUE) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Adds native window behavior to the live timeline page. Content is not
@@ -186,15 +352,47 @@ struct AuthState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[cfg(windows)]
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if args
+                .iter()
+                .any(|argument| argument.as_str() == AUTOSTART_ARGUMENT)
+            {
+                return;
+            }
+            app.state::<WindowTracking>().lock().background_mode = false;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    #[cfg(not(windows))]
+    let builder = tauri::Builder::default();
+
+    #[cfg(windows)]
+    let background_mode = launched_by_autostart();
+
+    builder
         .manage(WindowTracking::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(windows)]
+            {
+                let persistence_path = app
+                    .path()
+                    .app_config_dir()
+                    .ok()
+                    .map(|path| path.join(TRACKING_SETTINGS_FILE));
+                app.state::<WindowTracking>()
+                    .configure(persistence_path, background_mode);
+            }
+
             // The main window has `create: false` in tauri.conf.json so it can
             // be built here with the window integration script attached.
-            let window_config = app
+            let mut window_config = app
                 .config()
                 .app
                 .windows
@@ -202,6 +400,10 @@ pub fn run() {
                 .find(|w| w.label == "main")
                 .expect("main window missing from tauri.conf.json")
                 .clone();
+            #[cfg(windows)]
+            if background_mode {
+                window_config.visible = false;
+            }
             let main = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
                 .initialization_script(WINDOW_INTEGRATION_SCRIPT)
                 .build()?;
@@ -250,6 +452,8 @@ pub fn run() {
             MENU_ALWAYS_ON_TOP => toggle_always_on_top(app),
             MENU_HIDE_WHEN_UNFOCUSED => toggle_hide_when_unfocused(app),
             MENU_ATTACH_WINDOW => request_window_selection(app),
+            #[cfg(windows)]
+            MENU_START_WITH_WINDOWS => toggle_start_with_windows(app),
             MENU_OPEN_SITE => {
                 let _ = app.opener().open_url(SITE_URL, None::<&str>);
             }
@@ -302,11 +506,12 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
     let tracking = app.state::<WindowTracking>();
     let on_top = tracking.lock().always_on_top;
     #[cfg(windows)]
-    let (hide_when_unfocused, tracking_status) = {
+    let (hide_when_unfocused, tracking_status, start_with_windows) = {
         let settings = tracking.lock();
         (
             settings.hide_when_unfocused,
             tracking_status_label(&settings),
+            windows_startup_enabled().unwrap_or(false),
         )
     };
     let menu = (|| -> tauri::Result<Menu<Wry>> {
@@ -364,6 +569,14 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
                 hide_when_unfocused,
                 None::<&str>,
             )?)?;
+            menu.append(&CheckMenuItem::with_id(
+                app,
+                MENU_START_WITH_WINDOWS,
+                "Start with Windows",
+                true,
+                start_with_windows,
+                None::<&str>,
+            )?)?;
         }
         menu.append(&CheckMenuItem::with_id(
             app,
@@ -415,6 +628,18 @@ fn toggle_hide_when_unfocused(app: &AppHandle) {
     #[cfg(windows)]
     {
         settings.actual_topmost = None;
+    }
+}
+
+#[cfg(windows)]
+fn toggle_start_with_windows(app: &AppHandle) {
+    let result = windows_startup_enabled().and_then(|enabled| set_windows_startup(!enabled));
+    if result.is_err() {
+        app.dialog()
+            .message("The Windows startup setting could not be changed.")
+            .title("Startup setting failed")
+            .kind(MessageDialogKind::Error)
+            .blocking_show();
     }
 }
 
@@ -500,6 +725,10 @@ fn normalized_username(username: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{effective_topmost, normalized_username, MAX_USERNAME_CHARS};
+    #[cfg(windows)]
+    use super::{
+        is_valid_process_name, windows_startup_command, PersistedWindowTracking, AUTOSTART_ARGUMENT,
+    };
 
     #[test]
     fn username_is_trimmed_and_control_characters_are_removed() {
@@ -531,5 +760,37 @@ mod tests {
         assert!(effective_topmost(true, false, false));
         assert!(!effective_topmost(false, false, true));
         assert!(!effective_topmost(false, true, true));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remembered_process_name_must_be_safe_and_nonempty() {
+        assert!(is_valid_process_name("L2.bin"));
+        assert!(!is_valid_process_name(""));
+        assert!(!is_valid_process_name("L2.bin\n"));
+        assert!(!is_valid_process_name(&"a".repeat(261)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_command_quotes_the_executable_path() {
+        let command = windows_startup_command().expect("startup command");
+        let suffix = format!("\" {AUTOSTART_ARGUMENT}");
+        assert!(command.starts_with('"'));
+        assert!(command.ends_with(suffix.as_str()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remembered_attachment_serializes_with_its_offset() {
+        let settings = PersistedWindowTracking {
+            preferred_process: "L2.bin".to_string(),
+            offset: Some([48, -12]),
+        };
+        let serialized = serde_json::to_vec(&settings).expect("serialize settings");
+        let restored: PersistedWindowTracking =
+            serde_json::from_slice(&serialized).expect("restore settings");
+        assert_eq!(restored.preferred_process, "L2.bin");
+        assert_eq!(restored.offset, Some([48, -12]));
     }
 }

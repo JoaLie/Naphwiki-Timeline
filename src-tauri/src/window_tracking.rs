@@ -1,4 +1,4 @@
-use super::{effective_topmost, WindowTracking};
+use super::{effective_topmost, persist_tracking_settings, WindowTracking};
 use std::{
     ffi::c_void,
     thread,
@@ -21,6 +21,9 @@ const MB_OKCANCEL: u32 = 0x0001;
 const MB_ICONINFORMATION: u32 = 0x0040;
 const MB_SETFOREGROUND: u32 = 0x0001_0000;
 const IDOK: i32 = 1;
+const SW_HIDE: i32 = 0;
+const SW_SHOWNOACTIVATE: i32 = 4;
+const PERSIST_DELAY: Duration = Duration::from_millis(400);
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -75,6 +78,8 @@ extern "system" {
         height: i32,
         flags: u32,
     ) -> i32;
+    #[link_name = "ShowWindow"]
+    fn show_window(window: NativeWindow, command: i32) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -98,22 +103,34 @@ pub(super) fn start(own_window: isize, tracking: WindowTracking) {
         .spawn(move || {
             let own_process_id = process_id(own_window).unwrap_or_default();
             let mut next_search = Instant::now();
+            let mut persist_at = None;
 
             loop {
                 if !window_exists(own_window) {
+                    persist_tracking_settings(&tracking.lock());
                     break;
                 }
 
-                select_foreground_window(own_window, own_process_id, &tracking);
+                let mut settings_changed =
+                    select_foreground_window(own_window, own_process_id, &tracking);
                 validate_target(&tracking);
 
                 let needs_target = tracking.lock().target.is_none();
                 if needs_target && Instant::now() >= next_search {
-                    find_preferred_window(own_window, own_process_id, &tracking);
+                    settings_changed |=
+                        find_preferred_window(own_window, own_process_id, &tracking);
                     next_search = Instant::now() + Duration::from_secs(1);
                 }
 
-                update_tracked_position(own_window, &tracking);
+                settings_changed |= update_tracked_position(own_window, &tracking);
+                if settings_changed {
+                    persist_at = Some(Instant::now() + PERSIST_DELAY);
+                }
+                if persist_at.is_some_and(|deadline| Instant::now() >= deadline) {
+                    persist_tracking_settings(&tracking.lock());
+                    persist_at = None;
+                }
+                update_visibility(own_window, &tracking);
                 update_topmost(own_window, &tracking);
                 thread::sleep(Duration::from_millis(16));
             }
@@ -150,29 +167,35 @@ pub(super) fn request_selection(own_window: isize, tracking: WindowTracking) {
         });
 }
 
-fn select_foreground_window(own_window: isize, own_process_id: u32, tracking: &WindowTracking) {
+fn select_foreground_window(
+    own_window: isize,
+    own_process_id: u32,
+    tracking: &WindowTracking,
+) -> bool {
     if !tracking.lock().selection_armed {
-        return;
+        return false;
     }
 
     let Some(handle) = foreground_root_window() else {
-        return;
+        return false;
     };
     if handle == own_window || !selectable_window(handle, own_process_id) {
-        return;
+        return false;
     }
     thread::sleep(Duration::from_millis(80));
     if foreground_root_window() != Some(handle) {
-        return;
+        return false;
     }
 
     if let Some(candidate) = candidate_for_window(handle) {
         let mut settings = tracking.lock();
         if settings.selection_armed {
-            attach(&mut settings, candidate, own_window);
+            let attached = attach(&mut settings, candidate, own_window, false);
             settings.selection_armed = false;
+            return attached;
         }
     }
+    false
 }
 
 fn validate_target(tracking: &WindowTracking) {
@@ -199,7 +222,11 @@ fn validate_target(tracking: &WindowTracking) {
     }
 }
 
-fn find_preferred_window(own_window: isize, own_process_id: u32, tracking: &WindowTracking) {
+fn find_preferred_window(
+    own_window: isize,
+    own_process_id: u32,
+    tracking: &WindowTracking,
+) -> bool {
     let preferred_process = tracking.lock().preferred_process.clone();
     let candidate = visible_windows(own_process_id)
         .into_iter()
@@ -212,40 +239,58 @@ fn find_preferred_window(own_window: isize, own_process_id: u32, tracking: &Wind
                 .preferred_process
                 .eq_ignore_ascii_case(&preferred_process)
         {
-            attach(&mut settings, candidate, own_window);
+            return attach(&mut settings, candidate, own_window, true);
         }
     }
+    false
 }
 
 fn attach(
     settings: &mut super::WindowTrackingSettings,
     candidate: WindowCandidate,
     own_window: isize,
-) {
+    restore_remembered_offset: bool,
+) -> bool {
     let Some(target_rect) = window_rect(candidate.handle) else {
-        return;
+        return false;
     };
     let Some(own_rect) = window_rect(own_window) else {
-        return;
+        return false;
     };
 
-    let offset = (
+    let current_offset = (
         own_rect.left - target_rect.left,
         own_rect.top - target_rect.top,
     );
+    let mut offset = if restore_remembered_offset {
+        settings.remembered_offset.unwrap_or(current_offset)
+    } else {
+        current_offset
+    };
+    let desired_position = (target_rect.left + offset.0, target_rect.top + offset.1);
+    let overlay_position = if (own_rect.left, own_rect.top) == desired_position
+        || move_window(own_window, desired_position.0, desired_position.1)
+    {
+        desired_position
+    } else {
+        offset = current_offset;
+        (own_rect.left, own_rect.top)
+    };
     settings.preferred_process = candidate.process_name.clone();
     settings.attached_process = Some(candidate.process_name.clone());
+    settings.remembered_offset = Some(offset);
     settings.target = Some(super::AttachedWindow {
         handle: candidate.handle,
         process_id: candidate.process_id,
         offset,
         last_target_position: (target_rect.left, target_rect.top),
-        last_overlay_position: (own_rect.left, own_rect.top),
+        last_overlay_position: overlay_position,
     });
     settings.actual_topmost = None;
+    true
 }
 
-fn update_tracked_position(own_window: isize, tracking: &WindowTracking) {
+fn update_tracked_position(own_window: isize, tracking: &WindowTracking) -> bool {
     let target = tracking.lock().target.as_ref().map(|target| {
         (
             target.handle,
@@ -256,18 +301,18 @@ fn update_tracked_position(own_window: isize, tracking: &WindowTracking) {
         )
     });
     let Some(target) = target else {
-        return;
+        return false;
     };
     let (handle, process_id, offset, last_target_position, last_overlay_position) = target;
     if unsafe { is_iconic(native_window(handle)) } != 0 {
-        return;
+        return false;
     }
 
     let Some(target_rect) = window_rect(handle) else {
-        return;
+        return false;
     };
     let Some(own_rect) = window_rect(own_window) else {
-        return;
+        return false;
     };
     let target_position = (target_rect.left, target_rect.top);
     let own_position = (own_rect.left, own_rect.top);
@@ -301,9 +346,35 @@ fn update_tracked_position(own_window: isize, tracking: &WindowTracking) {
         .as_mut()
         .filter(|target| target.handle == handle && target.process_id == process_id)
     {
+        let offset_changed = target.offset != new_offset;
         target.offset = new_offset;
         target.last_target_position = new_target_position;
         target.last_overlay_position = new_overlay_position;
+        if offset_changed {
+            settings.remembered_offset = Some(new_offset);
+        }
+        return offset_changed;
+    }
+    false
+}
+
+fn update_visibility(own_window: isize, tracking: &WindowTracking) {
+    let should_show = {
+        let settings = tracking.lock();
+        !settings.background_mode || settings.target.is_some()
+    };
+    let is_visible = unsafe { is_window_visible(native_window(own_window)) != 0 };
+    if should_show != is_visible {
+        unsafe {
+            show_window(
+                native_window(own_window),
+                if should_show {
+                    SW_SHOWNOACTIVATE
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
     }
 }
 
