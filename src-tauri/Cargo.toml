@@ -1,6 +1,6 @@
 [package]
 name = "naphwiki-timeline"
-version = "0.1.4"
+version = "0.1.5"
 description = "Naphwiki event timeline as an always-on-top desktop strip"
 edition = "2021"
 license = "MIT"

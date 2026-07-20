@@ -1,6 +1,10 @@
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    sync::{Arc, Mutex, MutexGuard},
+    thread,
+    time::Duration,
+};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     AppHandle, Listener, Manager, WebviewUrl, WindowEvent, Wry,
@@ -20,6 +24,7 @@ mod window_tracking;
 const MENU_LOGIN: &str = "login";
 const MENU_LOGOUT: &str = "logout";
 const MENU_LOGGED_IN_AS: &str = "logged-in-as";
+const MENU_TIMELINE_SETTINGS: &str = "timeline-settings";
 const MENU_ALWAYS_ON_TOP: &str = "always-on-top";
 const MENU_HIDE_WHEN_UNFOCUSED: &str = "hide-when-unfocused";
 #[cfg(windows)]
@@ -34,6 +39,7 @@ const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
 
 const SITE_URL: &str = "https://www.naphwiki.com";
 const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimeline";
+const SETTINGS_URL: &str = "https://www.naphwiki.com/timeline/settings";
 #[cfg(windows)]
 const DEFAULT_TARGET_PROCESS: &str = "L2.bin";
 #[cfg(windows)]
@@ -458,18 +464,39 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "timeline-settings" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    let app = window.app_handle().clone();
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_secs(2));
+                        if let Some(settings) = app.get_webview_window("timeline-settings") {
+                            let _ = settings.destroy();
+                        }
+                        if let Some(main) = app.get_webview_window("main") {
+                            let _ = main.reload();
+                        }
+                    });
+                    return;
+                }
+            }
+
             // The strip refreshes itself when the login popup it opened goes
             // away; when the popup was opened from the context menu instead,
             // trigger that refresh here.
-            if matches!(event, WindowEvent::Destroyed) && window.label() == "discord-login" {
-                if let Some(main) = window.app_handle().get_webview_window("main") {
-                    let _ = main.reload();
+            if matches!(event, WindowEvent::Destroyed) {
+                if window.label() == "discord-login" {
+                    if let Some(main) = window.app_handle().get_webview_window("main") {
+                        let _ = main.reload();
+                    }
                 }
             }
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_LOGIN => open_login_window(app),
             MENU_LOGOUT => log_out(app),
+            MENU_TIMELINE_SETTINGS => open_settings_window(app),
             MENU_ALWAYS_ON_TOP => toggle_always_on_top(app),
             MENU_HIDE_WHEN_UNFOCUSED => toggle_hide_when_unfocused(app),
             #[cfg(windows)]
@@ -559,6 +586,14 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
                 MENU_LOGGED_IN_AS,
                 label,
                 false,
+                None::<&str>,
+            )?)?;
+            account_menu.append(&PredefinedMenuItem::separator(app)?)?;
+            account_menu.append(&MenuItem::with_id(
+                app,
+                MENU_TIMELINE_SETTINGS,
+                "Timeline settings",
+                true,
                 None::<&str>,
             )?)?;
             account_menu.append(&MenuItem::with_id(
@@ -788,6 +823,26 @@ fn open_login_window(app: &AppHandle) {
         .inner_size(520.0, 780.0)
         .center()
         .always_on_top(true)
+        .build();
+}
+
+fn open_settings_window(app: &AppHandle) {
+    if let Some(existing) = app.get_webview_window("timeline-settings") {
+        if existing.is_visible().unwrap_or(false) {
+            let _ = existing.set_focus();
+        }
+        return;
+    }
+    let url: tauri::Url = match SETTINGS_URL.parse() {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    let _ = tauri::WebviewWindowBuilder::new(app, "timeline-settings", WebviewUrl::External(url))
+        .title("Timeline settings")
+        .inner_size(760.0, 820.0)
+        .min_inner_size(480.0, 520.0)
+        .center()
+        .resizable(true)
         .build();
 }
 
