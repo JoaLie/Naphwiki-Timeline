@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     AppHandle, Listener, Manager, WebviewUrl, WindowEvent, Wry,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -22,6 +22,8 @@ const MENU_LOGOUT: &str = "logout";
 const MENU_LOGGED_IN_AS: &str = "logged-in-as";
 const MENU_ALWAYS_ON_TOP: &str = "always-on-top";
 const MENU_HIDE_WHEN_UNFOCUSED: &str = "hide-when-unfocused";
+#[cfg(windows)]
+const MENU_EXCLUDE_FROM_CAPTURE: &str = "exclude-from-capture";
 const MENU_ATTACH_WINDOW: &str = "attach-window";
 #[cfg(windows)]
 const MENU_ATTACHED_PROCESS: &str = "attached-process";
@@ -59,6 +61,8 @@ struct WindowTrackingSettings {
     always_on_top: bool,
     hide_when_unfocused: bool,
     #[cfg(windows)]
+    exclude_from_capture: bool,
+    #[cfg(windows)]
     preferred_process: String,
     #[cfg(windows)]
     attached_process: Option<String>,
@@ -92,6 +96,8 @@ impl Default for WindowTracking {
         Self(Arc::new(Mutex::new(WindowTrackingSettings {
             always_on_top: true,
             hide_when_unfocused: true,
+            #[cfg(windows)]
+            exclude_from_capture: false,
             #[cfg(windows)]
             preferred_process: DEFAULT_TARGET_PROCESS.to_string(),
             #[cfg(windows)]
@@ -128,6 +134,7 @@ impl WindowTracking {
                 settings.preferred_process = persisted.preferred_process;
             }
             settings.remembered_offset = persisted.offset.map(|offset| (offset[0], offset[1]));
+            settings.exclude_from_capture = persisted.exclude_from_capture;
         }
         settings.persistence_path = persistence_path;
         settings.background_mode = background_mode;
@@ -139,6 +146,8 @@ impl WindowTracking {
 struct PersistedWindowTracking {
     preferred_process: String,
     offset: Option<[i32; 2]>,
+    #[serde(default)]
+    exclude_from_capture: bool,
 }
 
 #[cfg(windows)]
@@ -158,6 +167,7 @@ fn persist_tracking_settings(settings: &WindowTrackingSettings) {
     let persisted = PersistedWindowTracking {
         preferred_process: settings.preferred_process.clone(),
         offset: settings.remembered_offset.map(|(x, y)| [x, y]),
+        exclude_from_capture: settings.exclude_from_capture,
     };
     let Ok(contents) = serde_json::to_vec_pretty(&persisted) else {
         return;
@@ -411,6 +421,17 @@ pub fn run() {
             #[cfg(windows)]
             {
                 let native_window = main.hwnd()?.0 as isize;
+                let exclude_from_capture =
+                    app.state::<WindowTracking>().lock().exclude_from_capture;
+                if exclude_from_capture
+                    && window_tracking::capture_exclusion_supported()
+                    && !window_tracking::set_capture_exclusion(native_window, true)
+                {
+                    let tracking = app.state::<WindowTracking>();
+                    let mut settings = tracking.lock();
+                    settings.exclude_from_capture = false;
+                    persist_tracking_settings(&settings);
+                }
                 window_tracking::start(
                     native_window,
                     app.state::<WindowTracking>().inner().clone(),
@@ -451,6 +472,8 @@ pub fn run() {
             MENU_LOGOUT => log_out(app),
             MENU_ALWAYS_ON_TOP => toggle_always_on_top(app),
             MENU_HIDE_WHEN_UNFOCUSED => toggle_hide_when_unfocused(app),
+            #[cfg(windows)]
+            MENU_EXCLUDE_FROM_CAPTURE => toggle_exclude_from_capture(app),
             MENU_ATTACH_WINDOW => request_window_selection(app),
             #[cfg(windows)]
             MENU_START_WITH_WINDOWS => toggle_start_with_windows(app),
@@ -506,29 +529,39 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
     let tracking = app.state::<WindowTracking>();
     let on_top = tracking.lock().always_on_top;
     #[cfg(windows)]
-    let (hide_when_unfocused, tracking_status, start_with_windows) = {
+    let (
+        hide_when_unfocused,
+        exclude_from_capture,
+        capture_exclusion_supported,
+        tracking_status,
+        start_with_windows,
+    ) = {
         let settings = tracking.lock();
+        let capture_exclusion_supported = window_tracking::capture_exclusion_supported();
         (
             settings.hide_when_unfocused,
+            settings.exclude_from_capture && capture_exclusion_supported,
+            capture_exclusion_supported,
             tracking_status_label(&settings),
             windows_startup_enabled().unwrap_or(false),
         )
     };
     let menu = (|| -> tauri::Result<Menu<Wry>> {
         let menu = Menu::new(app)?;
+        let account_menu = Submenu::new(app, "Account", true)?;
         if auth.logged_in {
             let label = match normalized_username(auth.username.as_deref()) {
                 Some(name) => format!("Logged in as {name}"),
                 None => "Logged in".to_string(),
             };
-            menu.append(&MenuItem::with_id(
+            account_menu.append(&MenuItem::with_id(
                 app,
                 MENU_LOGGED_IN_AS,
                 label,
                 false,
                 None::<&str>,
             )?)?;
-            menu.append(&MenuItem::with_id(
+            account_menu.append(&MenuItem::with_id(
                 app,
                 MENU_LOGOUT,
                 "Log out",
@@ -536,7 +569,7 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
                 None::<&str>,
             )?)?;
         } else {
-            menu.append(&MenuItem::with_id(
+            account_menu.append(&MenuItem::with_id(
                 app,
                 MENU_LOGIN,
                 "Login",
@@ -544,24 +577,27 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
                 None::<&str>,
             )?)?;
         }
-        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&account_menu)?;
+
         #[cfg(windows)]
         {
-            menu.append(&MenuItem::with_id(
+            let tracking_menu = Submenu::new(app, "Window tracking", true)?;
+            tracking_menu.append(&MenuItem::with_id(
                 app,
                 MENU_ATTACH_WINDOW,
                 "Attach to window",
                 true,
                 None::<&str>,
             )?)?;
-            menu.append(&MenuItem::with_id(
+            tracking_menu.append(&MenuItem::with_id(
                 app,
                 MENU_ATTACHED_PROCESS,
                 tracking_status,
                 false,
                 None::<&str>,
             )?)?;
-            menu.append(&CheckMenuItem::with_id(
+            tracking_menu.append(&PredefinedMenuItem::separator(app)?)?;
+            tracking_menu.append(&CheckMenuItem::with_id(
                 app,
                 MENU_HIDE_WHEN_UNFOCUSED,
                 "Hide when game is not in focus",
@@ -569,7 +605,40 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
                 hide_when_unfocused,
                 None::<&str>,
             )?)?;
-            menu.append(&CheckMenuItem::with_id(
+            menu.append(&tracking_menu)?;
+        }
+
+        let window_menu = Submenu::new(app, "Window behavior", true)?;
+        window_menu.append(&CheckMenuItem::with_id(
+            app,
+            MENU_ALWAYS_ON_TOP,
+            "Always on top",
+            true,
+            on_top,
+            None::<&str>,
+        )?)?;
+        #[cfg(windows)]
+        {
+            let capture_label = if capture_exclusion_supported {
+                "Exclude from capture"
+            } else {
+                "Exclude from capture (requires Windows 10 2004+)"
+            };
+            window_menu.append(&CheckMenuItem::with_id(
+                app,
+                MENU_EXCLUDE_FROM_CAPTURE,
+                capture_label,
+                capture_exclusion_supported,
+                exclude_from_capture,
+                None::<&str>,
+            )?)?;
+        }
+        menu.append(&window_menu)?;
+
+        #[cfg(windows)]
+        {
+            let application_menu = Submenu::new(app, "Application", true)?;
+            application_menu.append(&CheckMenuItem::with_id(
                 app,
                 MENU_START_WITH_WINDOWS,
                 "Start with Windows",
@@ -577,15 +646,9 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
                 start_with_windows,
                 None::<&str>,
             )?)?;
+            menu.append(&application_menu)?;
         }
-        menu.append(&CheckMenuItem::with_id(
-            app,
-            MENU_ALWAYS_ON_TOP,
-            "Always on Top",
-            true,
-            on_top,
-            None::<&str>,
-        )?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
         menu.append(&MenuItem::with_id(
             app,
             MENU_OPEN_SITE,
@@ -628,6 +691,32 @@ fn toggle_hide_when_unfocused(app: &AppHandle) {
     #[cfg(windows)]
     {
         settings.actual_topmost = None;
+    }
+}
+
+#[cfg(windows)]
+fn toggle_exclude_from_capture(app: &AppHandle) {
+    if !window_tracking::capture_exclusion_supported() {
+        return;
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(native_window) = window.hwnd() else {
+        return;
+    };
+    let tracking = app.state::<WindowTracking>();
+    let exclude_from_capture = !tracking.lock().exclude_from_capture;
+    if window_tracking::set_capture_exclusion(native_window.0 as isize, exclude_from_capture) {
+        let mut settings = tracking.lock();
+        settings.exclude_from_capture = exclude_from_capture;
+        persist_tracking_settings(&settings);
+    } else {
+        app.dialog()
+            .message("The capture exclusion setting could not be changed.")
+            .title("Capture setting failed")
+            .kind(MessageDialogKind::Error)
+            .blocking_show();
     }
 }
 
@@ -786,11 +875,22 @@ mod tests {
         let settings = PersistedWindowTracking {
             preferred_process: "L2.bin".to_string(),
             offset: Some([48, -12]),
+            exclude_from_capture: true,
         };
         let serialized = serde_json::to_vec(&settings).expect("serialize settings");
         let restored: PersistedWindowTracking =
             serde_json::from_slice(&serialized).expect("restore settings");
         assert_eq!(restored.preferred_process, "L2.bin");
         assert_eq!(restored.offset, Some([48, -12]));
+        assert!(restored.exclude_from_capture);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn older_tracking_settings_default_capture_exclusion_to_off() {
+        let restored: PersistedWindowTracking =
+            serde_json::from_str(r#"{"preferred_process":"L2.bin","offset":[48,-12]}"#)
+                .expect("restore old settings");
+        assert!(!restored.exclude_from_capture);
     }
 }

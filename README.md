@@ -28,11 +28,8 @@ storage are kept there as well, like browser data.
   their normal behavior. Invisible edge/corner handles resize the window
   without requiring native window borders.
 - A close button in the top-right corner closes the app.
-- Right-click anywhere in the strip for a settings menu: **Login** while
-  logged out (or **Logged in as _username_** plus **Log out** while logged
-  in), attach the strip to another window, toggle focus-aware topmost behavior,
-  configure Windows startup, toggle **Always on Top**, or **Go to
-  Naphwiki.com** to open the full site in your default browser.
+- Right-click anywhere in the strip for a categorized settings menu covering
+  the account, window tracking, window behavior, and application startup.
 - On Windows, the strip automatically looks for `L2.bin` and keeps its current
   offset when the game window moves. Moving or resizing the strip still works
   normally; a manual move becomes the new tracked offset, and that offset is
@@ -48,6 +45,9 @@ storage are kept there as well, like browser data.
   in. It waits for the remembered game process, shows and positions the strip
   when the game opens, and hides it again when the game closes. Opening the app
   manually reveals the existing instance instead of creating a duplicate.
+- **Exclude from capture** can hide the strip from compatible screen-capture
+  software while leaving it visible and usable locally. It is off by default
+  and is disabled on Windows versions older than Windows 10 version 2004.
 - Checks for a new release when the app starts. Available updates are shown in
   a native confirmation dialog and are downloaded and installed only after the
   user agrees.

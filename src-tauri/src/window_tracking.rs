@@ -1,6 +1,7 @@
 use super::{effective_topmost, persist_tracking_settings, WindowTracking};
 use std::{
     ffi::c_void,
+    sync::OnceLock,
     thread,
     time::{Duration, Instant},
 };
@@ -23,7 +24,12 @@ const MB_SETFOREGROUND: u32 = 0x0001_0000;
 const IDOK: i32 = 1;
 const SW_HIDE: i32 = 0;
 const SW_SHOWNOACTIVATE: i32 = 4;
+const WDA_NONE: u32 = 0x0000_0000;
+const WDA_EXCLUDEFROMCAPTURE: u32 = 0x0000_0011;
+const WINDOWS_10_2004_BUILD: u32 = 19_041;
 const PERSIST_DELAY: Duration = Duration::from_millis(400);
+
+static CAPTURE_EXCLUSION_SUPPORTED: OnceLock<bool> = OnceLock::new();
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -32,6 +38,29 @@ struct NativeRect {
     top: i32,
     right: i32,
     bottom: i32,
+}
+
+#[repr(C)]
+struct RtlOsVersionInfo {
+    size: u32,
+    major_version: u32,
+    minor_version: u32,
+    build_number: u32,
+    platform_id: u32,
+    service_pack: [u16; 128],
+}
+
+impl Default for RtlOsVersionInfo {
+    fn default() -> Self {
+        Self {
+            size: std::mem::size_of::<Self>() as u32,
+            major_version: 0,
+            minor_version: 0,
+            build_number: 0,
+            platform_id: 0,
+            service_pack: [0; 128],
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -78,8 +107,16 @@ extern "system" {
         height: i32,
         flags: u32,
     ) -> i32;
+    #[link_name = "SetWindowDisplayAffinity"]
+    fn set_window_display_affinity(window: NativeWindow, affinity: u32) -> i32;
     #[link_name = "ShowWindow"]
     fn show_window(window: NativeWindow, command: i32) -> i32;
+}
+
+#[link(name = "ntdll")]
+extern "system" {
+    #[link_name = "RtlGetVersion"]
+    fn rtl_get_version(version: *mut RtlOsVersionInfo) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -165,6 +202,30 @@ pub(super) fn request_selection(own_window: isize, tracking: WindowTracking) {
             settings.selection_prompt_open = false;
             settings.selection_armed = response == IDOK;
         });
+}
+
+pub(super) fn capture_exclusion_supported() -> bool {
+    *CAPTURE_EXCLUSION_SUPPORTED.get_or_init(|| {
+        let mut version = RtlOsVersionInfo::default();
+        let succeeded = unsafe { rtl_get_version(&mut version) == 0 };
+        succeeded && version_supports_capture_exclusion(version.major_version, version.build_number)
+    })
+}
+
+pub(super) fn set_capture_exclusion(own_window: isize, exclude: bool) -> bool {
+    if !capture_exclusion_supported() {
+        return false;
+    }
+    let affinity = if exclude {
+        WDA_EXCLUDEFROMCAPTURE
+    } else {
+        WDA_NONE
+    };
+    unsafe { set_window_display_affinity(native_window(own_window), affinity) != 0 }
+}
+
+fn version_supports_capture_exclusion(major_version: u32, build_number: u32) -> bool {
+    major_version > 10 || (major_version == 10 && build_number >= WINDOWS_10_2004_BUILD)
 }
 
 fn select_foreground_window(
@@ -548,4 +609,19 @@ fn native_window(handle: isize) -> NativeWindow {
 
 fn wide_string(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_supports_capture_exclusion;
+
+    #[test]
+    fn capture_exclusion_requires_windows_10_2004_or_newer() {
+        assert!(!version_supports_capture_exclusion(6, 7_601));
+        assert!(!version_supports_capture_exclusion(10, 18_363));
+        assert!(!version_supports_capture_exclusion(10, 19_040));
+        assert!(version_supports_capture_exclusion(10, 19_041));
+        assert!(version_supports_capture_exclusion(10, 22_000));
+        assert!(version_supports_capture_exclusion(11, 1));
+    }
 }
