@@ -36,6 +36,7 @@ const MENU_ATTACHED_PROCESS: &str = "attached-process";
 const MENU_START_WITH_WINDOWS: &str = "start-with-windows";
 const MENU_OPEN_SITE: &str = "open-naphwiki";
 const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
+const ORIENTATION_EVENT: &str = "timeline-orientation-change";
 
 const SITE_URL: &str = "https://www.naphwiki.com";
 const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimeline";
@@ -366,6 +367,12 @@ struct AuthState {
     username: Option<String>,
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct OrientationState {
+    vertical: bool,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
@@ -455,6 +462,42 @@ pub fn run() {
                 let main_thread_handle = handle.clone();
                 let _ = handle
                     .run_on_main_thread(move || show_context_menu(&main_thread_handle, &auth));
+            });
+
+            let orientation_handle = app.handle().clone();
+            main.listen(ORIENTATION_EVENT, move |event| {
+                if event.payload().len() > MAX_EVENT_PAYLOAD_BYTES {
+                    return;
+                }
+                let orientation =
+                    serde_json::from_str::<OrientationState>(event.payload()).unwrap_or_default();
+                let handle = orientation_handle.clone();
+                let _ = orientation_handle.run_on_main_thread(move || {
+                    let Some(window) = handle.get_webview_window("main") else {
+                        return;
+                    };
+                    let Ok(scale_factor) = window.scale_factor() else {
+                        return;
+                    };
+                    let Ok(size) = window.inner_size() else {
+                        return;
+                    };
+                    let logical = size.to_logical::<f64>(scale_factor);
+
+                    if orientation.vertical {
+                        let _ = window.set_min_size(Some(tauri::LogicalSize::new(160.0, 320.0)));
+                        if logical.width > logical.height {
+                            let _ = window
+                                .set_size(tauri::LogicalSize::new(240.0, logical.width.max(320.0)));
+                        }
+                    } else {
+                        let _ = window.set_min_size(Some(tauri::LogicalSize::new(320.0, 25.0)));
+                        if logical.height > logical.width {
+                            let _ = window
+                                .set_size(tauri::LogicalSize::new(logical.height.max(320.0), 75.0));
+                        }
+                    }
+                });
             });
 
             let update_handle = app.handle().clone();
