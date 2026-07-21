@@ -26,9 +26,6 @@ const SW_HIDE: i32 = 0;
 const SW_SHOWNOACTIVATE: i32 = 4;
 const WDA_NONE: u32 = 0x0000_0000;
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x0000_0011;
-const DWMWA_NCRENDERING_POLICY: u32 = 2;
-const DWMNCRP_USEWINDOWSTYLE: i32 = 0;
-const DWMNCRP_DISABLED: i32 = 1;
 const WINDOWS_10_2004_BUILD: u32 = 19_041;
 const PERSIST_DELAY: Duration = Duration::from_millis(400);
 
@@ -122,17 +119,6 @@ extern "system" {
     fn rtl_get_version(version: *mut RtlOsVersionInfo) -> i32;
 }
 
-#[link(name = "dwmapi")]
-extern "system" {
-    #[link_name = "DwmSetWindowAttribute"]
-    fn dwm_set_window_attribute(
-        window: NativeWindow,
-        attribute: u32,
-        value: *const c_void,
-        value_size: u32,
-    ) -> i32;
-}
-
 #[link(name = "kernel32")]
 extern "system" {
     #[link_name = "CloseHandle"]
@@ -186,22 +172,6 @@ pub(super) fn start(own_window: isize, tracking: WindowTracking) {
                 thread::sleep(Duration::from_millis(16));
             }
         });
-}
-
-pub(super) fn set_window_shadow(handle: isize, visible: bool) -> bool {
-    let policy = if visible {
-        DWMNCRP_USEWINDOWSTYLE
-    } else {
-        DWMNCRP_DISABLED
-    };
-    unsafe {
-        dwm_set_window_attribute(
-            native_window(handle),
-            DWMWA_NCRENDERING_POLICY,
-            (&policy as *const i32).cast(),
-            std::mem::size_of_val(&policy) as u32,
-        ) == 0
-    }
 }
 
 pub(super) fn request_selection(own_window: isize, tracking: WindowTracking) {

@@ -42,13 +42,95 @@ const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
 const ORIENTATION_EVENT: &str = "timeline-orientation-change";
 const SETTINGS_CHANGE_EVENT: &str = "timeline-settings-change";
 const CHANGELOG_STATE_FILE: &str = "last-changelog-version.txt";
-const CURRENT_CHANGELOG: &str = "New in this version:\n\n\
-- Transparent surroundings no longer leave a Windows shadow around the app.\n\
-- Premium supporters can place the current-time line at the start of the timeline.\n\
-- Vertical timelines now run upward, and both layouts can be reduced to 20 px.\n\
-- The Hot Purge animation can be disabled.\n\
-- Appearance changes are previewed automatically.";
-static CHANGELOG_DIALOG_LOCK: Mutex<()> = Mutex::new(());
+const VERSION_HISTORY_WINDOW: &str = "version-history";
+const VERSION_HISTORY_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Naphwiki Timeline version history</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; background: #100d0a; color: #ded6ca; }
+    body { overflow-y: auto; }
+    header {
+      position: sticky; top: 0; z-index: 2; padding: 22px 24px 18px;
+      background: linear-gradient(180deg, rgba(34, 27, 20, 0.98), rgba(20, 16, 12, 0.96));
+      border-bottom: 1px solid #5a4026; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    }
+    h1 { margin: 0; color: #f0a847; font-size: 1.4rem; }
+    header p { margin: 7px 0 0; color: #a99f92; font-size: 0.86rem; }
+    main { display: grid; gap: 14px; padding: 18px 24px 28px; }
+    article {
+      padding: 16px 18px; background: linear-gradient(180deg, #211a14, #17120e);
+      border: 1px solid #46321f; border-radius: 8px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.2);
+    }
+    article.current { border-color: #b66c27; box-shadow: 0 0 0 1px rgba(240, 138, 44, 0.18); }
+    h2 { display: flex; align-items: center; gap: 9px; margin: 0 0 10px; color: #f0bd72; font-size: 1.02rem; }
+    .badge {
+      padding: 3px 7px; border-radius: 999px; background: #7b351d; color: #ffd7aa;
+      font-size: 0.65rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    ul { display: grid; gap: 7px; margin: 0; padding-left: 19px; }
+    li { color: #c8c0b5; font-size: 0.86rem; line-height: 1.42; }
+    ::-webkit-scrollbar { width: 10px; }
+    ::-webkit-scrollbar-track { background: #100d0a; }
+    ::-webkit-scrollbar-thumb { background: #694322; border: 2px solid #100d0a; border-radius: 999px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Version history</h1>
+    <p>Updates to Naphwiki Timeline, newest first.</p>
+  </header>
+  <main>
+    <article class="current">
+      <h2>Version 0.2.1 <span class="badge">Current</span></h2>
+      <ul>
+        <li>Restored the normal Windows shadow in transparent-surroundings mode.</li>
+        <li>Replaced the single-version notification with this scrollable version history.</li>
+      </ul>
+    </article>
+    <article>
+      <h2>Version 0.2.0</h2>
+      <ul>
+        <li>Added premium appearance controls for bar opacity, vertical layout, default event colors, and edge-aligned current time.</li>
+        <li>Added transparent surroundings and a switch for the Hot Purge animation.</li>
+        <li>Made vertical events move upward, allowed 20 px compact layouts, and added live settings previews.</li>
+      </ul>
+    </article>
+    <article>
+      <h2>Version 0.1.6</h2>
+      <ul><li>Added automatic window resizing when switching between horizontal and vertical timelines.</li></ul>
+    </article>
+    <article>
+      <h2>Version 0.1.5</h2>
+      <ul><li>Added the in-app timeline settings window and refreshed the timeline after settings or login changes.</li></ul>
+    </article>
+    <article>
+      <h2>Version 0.1.4</h2>
+      <ul><li>Added optional capture exclusion on supported Windows versions and reorganized the context menu.</li></ul>
+    </article>
+    <article>
+      <h2>Version 0.1.3</h2>
+      <ul><li>Changed the default target to L2.bin, added Windows startup support, and remembered the attached window position.</li></ul>
+    </article>
+    <article>
+      <h2>Version 0.1.2</h2>
+      <ul><li>Added window attachment, focus-aware topmost behavior, and automatic updates from GitHub releases.</li></ul>
+    </article>
+    <article>
+      <h2>Version 0.1.1</h2>
+      <ul><li>Added drag-anywhere movement, invisible resize handles, and improved account controls.</li></ul>
+    </article>
+    <article>
+      <h2>Version 0.1.0</h2>
+      <ul><li>Initial release of the Naphwiki Timeline Windows overlay.</li></ul>
+    </article>
+  </main>
+</body>
+</html>"##;
 
 const SITE_URL: &str = "https://www.naphwiki.com";
 const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimeline";
@@ -383,7 +465,6 @@ struct AuthState {
 #[serde(rename_all = "camelCase", default)]
 struct OrientationState {
     vertical: bool,
-    transparent_surroundings: bool,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -402,10 +483,7 @@ pub fn run() {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-            let changelog_handle = app.clone();
-            let _ = thread::Builder::new()
-                .name("changelog-dialog".to_string())
-                .spawn(move || show_changelog_once(&changelog_handle));
+            let _ = show_version_history_once(app);
         }));
     #[cfg(not(windows))]
     let builder = tauri::Builder::default();
@@ -493,13 +571,6 @@ pub fn run() {
                     let Some(window) = handle.get_webview_window("main") else {
                         return;
                     };
-                    #[cfg(windows)]
-                    if let Ok(native_window) = window.hwnd() {
-                        let _ = window_tracking::set_window_shadow(
-                            native_window.0 as isize,
-                            !orientation.transparent_surroundings,
-                        );
-                    }
                     let Ok(scale_factor) = window.scale_factor() else {
                         return;
                     };
@@ -546,14 +617,20 @@ pub fn run() {
 
             let launch_handle = app.handle().clone();
             #[cfg(windows)]
-            let show_changelog = !background_mode;
+            let show_version_history = !background_mode;
             #[cfg(not(windows))]
-            let show_changelog = true;
+            let show_version_history = true;
+            let version_history_open =
+                show_version_history && show_version_history_once(app.handle());
             let _ = thread::Builder::new()
                 .name("launch-notifications".to_string())
                 .spawn(move || {
-                    if show_changelog {
-                        show_changelog_once(&launch_handle);
+                    while version_history_open
+                        && launch_handle
+                            .get_webview_window(VERSION_HISTORY_WINDOW)
+                            .is_some()
+                    {
+                        thread::sleep(Duration::from_millis(250));
                     }
                     tauri::async_runtime::block_on(check_for_updates(launch_handle));
                 });
@@ -609,31 +686,53 @@ pub fn run() {
         .expect("error while running naphwiki timeline");
 }
 
-fn show_changelog_once(app: &AppHandle) {
-    let _dialog_guard = CHANGELOG_DIALOG_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+fn show_version_history_once(app: &AppHandle) -> bool {
     let version = app.package_info().version.to_string();
     let Ok(config_dir) = app.path().app_config_dir() else {
-        return;
+        return false;
     };
     let state_path = config_dir.join(CHANGELOG_STATE_FILE);
     let already_seen = std::fs::read_to_string(&state_path)
         .ok()
         .is_some_and(|last_seen| last_seen.trim() == version.as_str());
     if already_seen {
-        return;
+        return false;
     }
 
-    app.dialog()
-        .message(CURRENT_CHANGELOG)
-        .title(format!("What's new in Naphwiki Timeline {version}"))
-        .kind(MessageDialogKind::Info)
-        .blocking_show();
+    let Ok(url) = "about:blank".parse::<tauri::Url>() else {
+        return false;
+    };
+    let Ok(document) = serde_json::to_string(VERSION_HISTORY_HTML) else {
+        return false;
+    };
+    let initialization_script = format!(
+        "document.addEventListener('DOMContentLoaded',function(){{document.open();document.write({document});document.close();}},{{once:true}});"
+    );
+    let window =
+        tauri::WebviewWindowBuilder::new(app, VERSION_HISTORY_WINDOW, WebviewUrl::External(url))
+            .title(format!("Naphwiki Timeline {version} - version history"))
+            .inner_size(520.0, 600.0)
+            .min_inner_size(400.0, 340.0)
+            .center()
+            .resizable(true)
+            .always_on_top(true)
+            .visible(false)
+            .initialization_script(initialization_script)
+            .on_page_load(|window, payload| {
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            })
+            .build();
+    if window.is_err() {
+        return false;
+    }
 
     if std::fs::create_dir_all(&config_dir).is_ok() {
         let _ = std::fs::write(state_path, version);
     }
+    true
 }
 
 async fn check_for_updates(app: AppHandle) {
