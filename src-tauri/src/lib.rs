@@ -1,7 +1,10 @@
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
 use std::{
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
     thread,
     time::Duration,
 };
@@ -37,6 +40,15 @@ const MENU_START_WITH_WINDOWS: &str = "start-with-windows";
 const MENU_OPEN_SITE: &str = "open-naphwiki";
 const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
 const ORIENTATION_EVENT: &str = "timeline-orientation-change";
+const SETTINGS_CHANGE_EVENT: &str = "timeline-settings-change";
+const CHANGELOG_STATE_FILE: &str = "last-changelog-version.txt";
+const CURRENT_CHANGELOG: &str = "New in this version:\n\n\
+- Transparent surroundings no longer leave a Windows shadow around the app.\n\
+- Premium supporters can place the current-time line at the start of the timeline.\n\
+- Vertical timelines now run upward, and both layouts can be reduced to 20 px.\n\
+- The Hot Purge animation can be disabled.\n\
+- Appearance changes are previewed automatically.";
+static CHANGELOG_DIALOG_LOCK: Mutex<()> = Mutex::new(());
 
 const SITE_URL: &str = "https://www.naphwiki.com";
 const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimeline";
@@ -368,9 +380,10 @@ struct AuthState {
 }
 
 #[derive(Default, serde::Deserialize)]
-#[serde(default)]
+#[serde(rename_all = "camelCase", default)]
 struct OrientationState {
     vertical: bool,
+    transparent_surroundings: bool,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -389,6 +402,10 @@ pub fn run() {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+            let changelog_handle = app.clone();
+            let _ = thread::Builder::new()
+                .name("changelog-dialog".to_string())
+                .spawn(move || show_changelog_once(&changelog_handle));
         }));
     #[cfg(not(windows))]
     let builder = tauri::Builder::default();
@@ -476,6 +493,13 @@ pub fn run() {
                     let Some(window) = handle.get_webview_window("main") else {
                         return;
                     };
+                    #[cfg(windows)]
+                    if let Ok(native_window) = window.hwnd() {
+                        let _ = window_tracking::set_window_shadow(
+                            native_window.0 as isize,
+                            !orientation.transparent_surroundings,
+                        );
+                    }
                     let Ok(scale_factor) = window.scale_factor() else {
                         return;
                     };
@@ -485,13 +509,13 @@ pub fn run() {
                     let logical = size.to_logical::<f64>(scale_factor);
 
                     if orientation.vertical {
-                        let _ = window.set_min_size(Some(tauri::LogicalSize::new(160.0, 320.0)));
+                        let _ = window.set_min_size(Some(tauri::LogicalSize::new(20.0, 320.0)));
                         if logical.width > logical.height {
                             let _ = window
                                 .set_size(tauri::LogicalSize::new(240.0, logical.width.max(320.0)));
                         }
                     } else {
-                        let _ = window.set_min_size(Some(tauri::LogicalSize::new(320.0, 25.0)));
+                        let _ = window.set_min_size(Some(tauri::LogicalSize::new(320.0, 20.0)));
                         if logical.height > logical.width {
                             let _ = window
                                 .set_size(tauri::LogicalSize::new(logical.height.max(320.0), 75.0));
@@ -500,10 +524,39 @@ pub fn run() {
                 });
             });
 
-            let update_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                check_for_updates(update_handle).await;
+            let settings_refresh_generation = Arc::new(AtomicU64::new(0));
+            let settings_refresh_handle = app.handle().clone();
+            app.listen(SETTINGS_CHANGE_EVENT, move |_| {
+                let generation = settings_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                let latest_generation = settings_refresh_generation.clone();
+                let handle = settings_refresh_handle.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_secs(2));
+                    if latest_generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    let main_thread_handle = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        if let Some(main) = main_thread_handle.get_webview_window("main") {
+                            let _ = main.reload();
+                        }
+                    });
+                });
             });
+
+            let launch_handle = app.handle().clone();
+            #[cfg(windows)]
+            let show_changelog = !background_mode;
+            #[cfg(not(windows))]
+            let show_changelog = true;
+            let _ = thread::Builder::new()
+                .name("launch-notifications".to_string())
+                .spawn(move || {
+                    if show_changelog {
+                        show_changelog_once(&launch_handle);
+                    }
+                    tauri::async_runtime::block_on(check_for_updates(launch_handle));
+                });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -554,6 +607,33 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running naphwiki timeline");
+}
+
+fn show_changelog_once(app: &AppHandle) {
+    let _dialog_guard = CHANGELOG_DIALOG_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let version = app.package_info().version.to_string();
+    let Ok(config_dir) = app.path().app_config_dir() else {
+        return;
+    };
+    let state_path = config_dir.join(CHANGELOG_STATE_FILE);
+    let already_seen = std::fs::read_to_string(&state_path)
+        .ok()
+        .is_some_and(|last_seen| last_seen.trim() == version.as_str());
+    if already_seen {
+        return;
+    }
+
+    app.dialog()
+        .message(CURRENT_CHANGELOG)
+        .title(format!("What's new in Naphwiki Timeline {version}"))
+        .kind(MessageDialogKind::Info)
+        .blocking_show();
+
+    if std::fs::create_dir_all(&config_dir).is_ok() {
+        let _ = std::fs::write(state_path, version);
+    }
 }
 
 async fn check_for_updates(app: AppHandle) {
