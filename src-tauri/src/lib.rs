@@ -38,6 +38,8 @@ const MENU_ATTACHED_PROCESS: &str = "attached-process";
 #[cfg(windows)]
 const MENU_START_WITH_WINDOWS: &str = "start-with-windows";
 const MENU_OPEN_SITE: &str = "open-naphwiki";
+const MENU_BECOME_PREMIUM: &str = "become-premium";
+const MENU_CLOSE: &str = "close";
 const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
 const ORIENTATION_EVENT: &str = "timeline-orientation-change";
 const SETTINGS_CHANGE_EVENT: &str = "timeline-settings-change";
@@ -86,7 +88,15 @@ const VERSION_HISTORY_HTML: &str = r##"<!doctype html>
   </header>
   <main>
     <article class="current">
-      <h2>Version 0.2.1 <span class="badge">Current</span></h2>
+      <h2>Version 0.2.2 <span class="badge">Current</span></h2>
+      <ul>
+        <li>Allowed vertical timelines to shrink to a compact 20 px width.</li>
+        <li>Added premium supporter and Close actions to the context menu.</li>
+        <li>Improved compact vertical event labels and gradient direction.</li>
+      </ul>
+    </article>
+    <article>
+      <h2>Version 0.2.1</h2>
       <ul>
         <li>Restored the normal Windows shadow in transparent-surroundings mode.</li>
         <li>Replaced the single-version notification with this scrollable version history.</li>
@@ -133,6 +143,7 @@ const VERSION_HISTORY_HTML: &str = r##"<!doctype html>
 </html>"##;
 
 const SITE_URL: &str = "https://www.naphwiki.com";
+const PATREON_MEMBERSHIP_URL: &str = "https://www.patreon.com/cw/Naphwiki/membership";
 const LOGIN_URL: &str = "https://www.naphwiki.com/auth/discord?returnTo=%2Ftimeline";
 const SETTINGS_URL: &str = "https://www.naphwiki.com/timeline/settings";
 #[cfg(windows)]
@@ -680,6 +691,10 @@ pub fn run() {
             MENU_OPEN_SITE => {
                 let _ = app.opener().open_url(SITE_URL, None::<&str>);
             }
+            MENU_BECOME_PREMIUM => {
+                let _ = app.opener().open_url(PATREON_MEMBERSHIP_URL, None::<&str>);
+            }
+            MENU_CLOSE => app.exit(0),
             _ => {}
         })
         .run(tauri::generate_context!())
@@ -910,6 +925,21 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
             app,
             MENU_OPEN_SITE,
             "Go to Naphwiki.com",
+            true,
+            None::<&str>,
+        )?)?;
+        menu.append(&MenuItem::with_id(
+            app,
+            MENU_BECOME_PREMIUM,
+            "Become a premium supporter",
+            true,
+            None::<&str>,
+        )?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&MenuItem::with_id(
+            app,
+            MENU_CLOSE,
+            "Close",
             true,
             None::<&str>,
         )?)?;
