@@ -1,10 +1,13 @@
-use super::{effective_topmost, persist_tracking_settings, WindowTracking};
+use super::{
+    effective_topmost, ensure_main_window_visible, persist_tracking_settings, WindowTracking,
+};
 use std::{
     ffi::c_void,
     sync::OnceLock,
     thread,
     time::{Duration, Instant},
 };
+use tauri::{WebviewWindow, Wry};
 
 type NativeWindow = *mut c_void;
 type NativeHandle = *mut c_void;
@@ -134,7 +137,7 @@ extern "system" {
     ) -> i32;
 }
 
-pub(super) fn start(own_window: isize, tracking: WindowTracking) {
+pub(super) fn start(own_window: isize, tracking: WindowTracking, window: WebviewWindow<Wry>) {
     let _ = thread::Builder::new()
         .name("window-tracker".to_string())
         .spawn(move || {
@@ -153,13 +156,17 @@ pub(super) fn start(own_window: isize, tracking: WindowTracking) {
                 validate_target(&tracking);
 
                 let needs_target = tracking.lock().target.is_none();
+                let mut attached = false;
                 if needs_target && Instant::now() >= next_search {
-                    settings_changed |=
-                        find_preferred_window(own_window, own_process_id, &tracking);
+                    attached = find_preferred_window(own_window, own_process_id, &tracking);
+                    settings_changed |= attached;
                     next_search = Instant::now() + Duration::from_secs(1);
                 }
 
                 settings_changed |= update_tracked_position(own_window, &tracking);
+                if attached {
+                    let _ = ensure_main_window_visible(&window);
+                }
                 if settings_changed {
                     persist_at = Some(Instant::now() + PERSIST_DELAY);
                 }
@@ -167,7 +174,7 @@ pub(super) fn start(own_window: isize, tracking: WindowTracking) {
                     persist_tracking_settings(&tracking.lock());
                     persist_at = None;
                 }
-                update_visibility(own_window, &tracking);
+                update_visibility(own_window, &tracking, &window);
                 update_topmost(own_window, &tracking);
                 thread::sleep(Duration::from_millis(16));
             }
@@ -253,6 +260,9 @@ fn select_foreground_window(
         if settings.selection_armed {
             let attached = attach(&mut settings, candidate, own_window, false);
             settings.selection_armed = false;
+            if attached {
+                persist_tracking_settings(&settings);
+            }
             return attached;
         }
     }
@@ -419,13 +429,16 @@ fn update_tracked_position(own_window: isize, tracking: &WindowTracking) -> bool
     false
 }
 
-fn update_visibility(own_window: isize, tracking: &WindowTracking) {
+fn update_visibility(own_window: isize, tracking: &WindowTracking, window: &WebviewWindow<Wry>) {
     let should_show = {
         let settings = tracking.lock();
         !settings.background_mode || settings.target.is_some()
     };
     let is_visible = unsafe { is_window_visible(native_window(own_window)) != 0 };
     if should_show != is_visible {
+        if should_show {
+            let _ = ensure_main_window_visible(window);
+        }
         unsafe {
             show_window(
                 native_window(own_window),

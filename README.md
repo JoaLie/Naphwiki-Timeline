@@ -42,15 +42,20 @@ storage are kept there as well, like browser data.
   click any application window to track it instead. The settings menu shows the
   attached process name, or the process currently being searched for.
 - **Start with Windows** launches one hidden background instance when you sign
-  in. It waits for the remembered game process, shows and positions the strip
-  when the game opens, and hides it again when the game closes. Opening the app
-  manually reveals the existing instance instead of creating a duplicate.
+  in. It waits for the last manually selected process (or `L2.bin` by default),
+  shows and positions the strip when the game opens, and hides it again when the
+  game closes. Opening the app manually reveals the existing instance instead
+  of creating a duplicate. Whenever the strip is shown or restored, it is moved
+  back into the nearest monitor work area only if no monitor contains a usable
+  portion of it.
 - **Exclude from capture** can hide the strip from compatible screen-capture
   software while leaving it visible and usable locally. It is off by default
   and is disabled on Windows versions older than Windows 10 version 2004.
-- Checks for a new release when the app starts. Available updates are shown in
-  a native confirmation dialog and are downloaded and installed only after the
-  user agrees.
+- Checks for a new release when the app starts and continues checking silently
+  every hour while it remains open. Startup updates are shown in a native
+  confirmation dialog and are downloaded and installed only after the user
+  agrees. While an update remains available, the **Application** menu shows its
+  version and can open or reopen the update prompt.
 - Optional Discord login (hover-reveal button, top-left, while logged out):
   opens a normal-sized login window, and your customized timeline (hidden
   events, custom events, notification settings) loads into the strip once it

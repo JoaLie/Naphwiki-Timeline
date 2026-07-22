@@ -12,9 +12,11 @@ use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     AppHandle, Listener, Manager, WebviewUrl, WindowEvent, Wry,
 };
+#[cfg(windows)]
+use tauri::{PhysicalPosition, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 #[cfg(windows)]
 use winreg::{
     enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_BINARY},
@@ -39,10 +41,12 @@ const MENU_ATTACHED_PROCESS: &str = "attached-process";
 const MENU_START_WITH_WINDOWS: &str = "start-with-windows";
 const MENU_OPEN_SITE: &str = "open-naphwiki";
 const MENU_BECOME_PREMIUM: &str = "become-premium";
+const MENU_UPDATE_AVAILABLE: &str = "update-available";
 const MENU_CLOSE: &str = "close";
 const CONTEXT_MENU_EVENT: &str = "timeline-context-menu";
 const ORIENTATION_EVENT: &str = "timeline-orientation-change";
 const SETTINGS_CHANGE_EVENT: &str = "timeline-settings-change";
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const CHANGELOG_STATE_FILE: &str = "last-changelog-version.txt";
 const VERSION_HISTORY_WINDOW: &str = "version-history";
 const VERSION_HISTORY_HTML: &str = r##"<!doctype html>
@@ -88,7 +92,15 @@ const VERSION_HISTORY_HTML: &str = r##"<!doctype html>
   </header>
   <main>
     <article class="current">
-      <h2>Version 0.2.2 <span class="badge">Current</span></h2>
+      <h2>Version 0.2.3 <span class="badge">Current</span></h2>
+      <ul>
+        <li>Improved startup recovery, remembered manually attached windows, and restored timelines that open outside the visible monitor area.</li>
+        <li>Added an update action to the context menu while a newer version is available.</li>
+        <li>Added a supporter thank-you message for logged-in premium members.</li>
+      </ul>
+    </article>
+    <article>
+      <h2>Version 0.2.2</h2>
       <ul>
         <li>Allowed vertical timelines to shrink to a compact 20 px width.</li>
         <li>Added premium supporter and Close actions to the context menu.</li>
@@ -165,6 +177,150 @@ const WINDOWS_STARTUP_VALUE: &str = "Naphwiki Timeline";
 const WINDOWS_STARTUP_ENABLED: [u8; 12] = [0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const MAX_EVENT_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_CHARS: usize = 64;
+#[cfg(any(windows, test))]
+const MIN_VISIBLE_WIDTH: i64 = 120;
+#[cfg(any(windows, test))]
+const MIN_VISIBLE_HEIGHT: i64 = 48;
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScreenRect {
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+}
+
+#[cfg(any(windows, test))]
+impl ScreenRect {
+    fn from_position_size(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            left: i64::from(x),
+            top: i64::from(y),
+            right: i64::from(x) + i64::from(width),
+            bottom: i64::from(y) + i64::from(height),
+        }
+    }
+
+    fn width(self) -> i64 {
+        (self.right - self.left).max(0)
+    }
+
+    fn height(self) -> i64 {
+        (self.bottom - self.top).max(0)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn intersection_dimensions(first: ScreenRect, second: ScreenRect) -> (i64, i64) {
+    (
+        (first.right.min(second.right) - first.left.max(second.left)).max(0),
+        (first.bottom.min(second.bottom) - first.top.max(second.top)).max(0),
+    )
+}
+
+#[cfg(any(windows, test))]
+fn intersection_area(first: ScreenRect, second: ScreenRect) -> i64 {
+    let (width, height) = intersection_dimensions(first, second);
+    width.saturating_mul(height)
+}
+
+#[cfg(any(windows, test))]
+fn rectangle_distance_squared(first: ScreenRect, second: ScreenRect) -> i128 {
+    let horizontal = if first.right < second.left {
+        second.left - first.right
+    } else if second.right < first.left {
+        first.left - second.right
+    } else {
+        0
+    };
+    let vertical = if first.bottom < second.top {
+        second.top - first.bottom
+    } else if second.bottom < first.top {
+        first.top - second.bottom
+    } else {
+        0
+    };
+    i128::from(horizontal).pow(2) + i128::from(vertical).pow(2)
+}
+
+#[cfg(any(windows, test))]
+fn is_sufficiently_visible(window: ScreenRect, work_area: ScreenRect) -> bool {
+    let (visible_width, visible_height) = intersection_dimensions(window, work_area);
+    let required_width = window.width().min(MIN_VISIBLE_WIDTH);
+    let required_height = window.height().min(MIN_VISIBLE_HEIGHT);
+    required_width > 0
+        && required_height > 0
+        && visible_width >= required_width
+        && visible_height >= required_height
+}
+
+#[cfg(any(windows, test))]
+fn clamp_window_axis(current: i64, extent: i64, area_start: i64, area_end: i64) -> i64 {
+    let available = (area_end - area_start).max(0);
+    if extent >= available {
+        area_start
+    } else {
+        current.clamp(area_start, area_end - extent)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn corrected_window_position(window: ScreenRect, work_areas: &[ScreenRect]) -> Option<(i64, i64)> {
+    if work_areas.is_empty()
+        || work_areas
+            .iter()
+            .any(|work_area| is_sufficiently_visible(window, *work_area))
+    {
+        return None;
+    }
+
+    let target = work_areas.iter().min_by(|first, second| {
+        intersection_area(window, **second)
+            .cmp(&intersection_area(window, **first))
+            .then_with(|| {
+                rectangle_distance_squared(window, **first)
+                    .cmp(&rectangle_distance_squared(window, **second))
+            })
+    })?;
+    Some((
+        clamp_window_axis(window.left, window.width(), target.left, target.right),
+        clamp_window_axis(window.top, window.height(), target.top, target.bottom),
+    ))
+}
+
+#[cfg(windows)]
+fn ensure_main_window_visible(window: &WebviewWindow<Wry>) -> bool {
+    let Ok(position) = window.outer_position() else {
+        return false;
+    };
+    let Ok(size) = window.outer_size() else {
+        return false;
+    };
+    let Ok(monitors) = window.available_monitors() else {
+        return false;
+    };
+    let work_areas = monitors
+        .iter()
+        .map(|monitor| {
+            let area = monitor.work_area();
+            ScreenRect::from_position_size(
+                area.position.x,
+                area.position.y,
+                area.size.width,
+                area.size.height,
+            )
+        })
+        .collect::<Vec<_>>();
+    let current = ScreenRect::from_position_size(position.x, position.y, size.width, size.height);
+    let Some((x, y)) = corrected_window_position(current, &work_areas) else {
+        return false;
+    };
+    let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
+        return false;
+    };
+    window.set_position(PhysicalPosition::new(x, y)).is_ok()
+}
 
 #[derive(Clone)]
 struct WindowTracking(Arc<Mutex<WindowTrackingSettings>>);
@@ -192,6 +348,8 @@ struct WindowTrackingSettings {
     persistence_path: Option<PathBuf>,
     #[cfg(windows)]
     background_mode: bool,
+    #[cfg(windows)]
+    manual_show_requested: bool,
 }
 
 #[cfg(windows)]
@@ -228,6 +386,8 @@ impl Default for WindowTracking {
             persistence_path: None,
             #[cfg(windows)]
             background_mode: false,
+            #[cfg(windows)]
+            manual_show_requested: false,
         })))
     }
 }
@@ -249,7 +409,9 @@ impl WindowTracking {
             settings.exclude_from_capture = persisted.exclude_from_capture;
         }
         settings.persistence_path = persistence_path;
-        settings.background_mode = background_mode;
+        let manual_show_requested = settings.manual_show_requested;
+        settings.background_mode =
+            should_start_in_background(background_mode, manual_show_requested);
     }
 }
 
@@ -302,6 +464,11 @@ fn is_valid_process_name(process: &str) -> bool {
 #[cfg(windows)]
 fn launched_by_autostart() -> bool {
     std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARGUMENT))
+}
+
+#[cfg(any(windows, test))]
+fn should_start_in_background(launched_by_autostart: bool, manual_show_requested: bool) -> bool {
+    launched_by_autostart && !manual_show_requested
 }
 
 #[cfg(windows)]
@@ -430,7 +597,7 @@ const WINDOW_INTEGRATION_SCRIPT: &str = r#"
   }, true);
 
   async function authState() {
-    var fallback = { loggedIn: false, username: null };
+    var fallback = { loggedIn: false, username: null, isPremium: false };
     var controller = new AbortController();
     var timeout = setTimeout(function () { controller.abort(); }, 1500);
     try {
@@ -446,7 +613,8 @@ const WINDOW_INTEGRATION_SCRIPT: &str = r#"
         || user.globalName || user.global_name || user.name || null;
       return {
         loggedIn: true,
-        username: typeof username === 'string' ? username : null
+        username: typeof username === 'string' ? username : null,
+        isPremium: user.isPremium === true
       };
     } catch (_) {
       return fallback;
@@ -470,12 +638,37 @@ const WINDOW_INTEGRATION_SCRIPT: &str = r#"
 struct AuthState {
     logged_in: bool,
     username: Option<String>,
+    is_premium: bool,
 }
 
 #[derive(Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct OrientationState {
     vertical: bool,
+}
+
+#[derive(Default)]
+struct AvailableUpdate(Mutex<Option<Update>>);
+
+impl AvailableUpdate {
+    fn version(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|update| update.version.clone())
+    }
+
+    fn update(&self) -> Option<Update> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn set_update(&self, update: Option<Update>) {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = update;
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -489,8 +682,15 @@ pub fn run() {
             {
                 return;
             }
-            app.state::<WindowTracking>().lock().background_mode = false;
+            {
+                let tracking = app.state::<WindowTracking>();
+                let mut settings = tracking.lock();
+                settings.manual_show_requested = true;
+                settings.background_mode = false;
+            }
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = ensure_main_window_visible(&window);
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -504,6 +704,7 @@ pub fn run() {
 
     builder
         .manage(WindowTracking::default())
+        .manage(AvailableUpdate::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -518,6 +719,8 @@ pub fn run() {
                 app.state::<WindowTracking>()
                     .configure(persistence_path, background_mode);
             }
+            #[cfg(windows)]
+            let background_mode = app.state::<WindowTracking>().lock().background_mode;
 
             // The main window has `create: false` in tauri.conf.json so it can
             // be built here with the window integration script attached.
@@ -539,6 +742,9 @@ pub fn run() {
 
             #[cfg(windows)]
             {
+                if !background_mode {
+                    let _ = ensure_main_window_visible(&main);
+                }
                 let native_window = main.hwnd()?.0 as isize;
                 let exclude_from_capture =
                     app.state::<WindowTracking>().lock().exclude_from_capture;
@@ -554,6 +760,7 @@ pub fn run() {
                 window_tracking::start(
                     native_window,
                     app.state::<WindowTracking>().inner().clone(),
+                    main.clone(),
                 );
             }
 
@@ -645,6 +852,15 @@ pub fn run() {
                     }
                     tauri::async_runtime::block_on(check_for_updates(launch_handle));
                 });
+            let periodic_update_handle = app.handle().clone();
+            let _ = thread::Builder::new()
+                .name("periodic-update-check".to_string())
+                .spawn(move || loop {
+                    thread::sleep(UPDATE_CHECK_INTERVAL);
+                    tauri::async_runtime::block_on(refresh_available_update(
+                        &periodic_update_handle,
+                    ));
+                });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -693,6 +909,14 @@ pub fn run() {
             }
             MENU_BECOME_PREMIUM => {
                 let _ = app.opener().open_url(PATREON_MEMBERSHIP_URL, None::<&str>);
+            }
+            MENU_UPDATE_AVAILABLE => {
+                let update_handle = app.clone();
+                let _ = thread::Builder::new()
+                    .name("manual-update-prompt".to_string())
+                    .spawn(move || {
+                        tauri::async_runtime::block_on(prompt_for_available_update(update_handle));
+                    });
             }
             MENU_CLOSE => app.exit(0),
             _ => {}
@@ -751,14 +975,37 @@ fn show_version_history_once(app: &AppHandle) -> bool {
 }
 
 async fn check_for_updates(app: AppHandle) {
+    if let Some(update) = refresh_available_update(&app).await {
+        prompt_for_update(app, update).await;
+    }
+}
+
+async fn refresh_available_update(app: &AppHandle) -> Option<Update> {
     let updater = match app.updater() {
         Ok(updater) => updater,
-        Err(_) => return,
+        Err(_) => return None,
     };
     let update = match updater.check().await {
         Ok(Some(update)) => update,
-        Ok(None) | Err(_) => return,
+        Ok(None) => {
+            app.state::<AvailableUpdate>().set_update(None);
+            return None;
+        }
+        Err(_) => return None,
     };
+    app.state::<AvailableUpdate>()
+        .set_update(Some(update.clone()));
+    Some(update)
+}
+
+async fn prompt_for_available_update(app: AppHandle) {
+    let update = app.state::<AvailableUpdate>().update();
+    if let Some(update) = update {
+        prompt_for_update(app, update).await;
+    }
+}
+
+async fn prompt_for_update(app: AppHandle, update: Update) {
     let version = update.version.clone();
     let response = app
         .dialog()
@@ -792,6 +1039,7 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
     };
     let tracking = app.state::<WindowTracking>();
     let on_top = tracking.lock().always_on_top;
+    let available_update = app.state::<AvailableUpdate>().version();
     #[cfg(windows)]
     let (
         hide_when_unfocused,
@@ -918,6 +1166,16 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
                 start_with_windows,
                 None::<&str>,
             )?)?;
+            if let Some(version) = available_update.as_deref() {
+                application_menu.append(&PredefinedMenuItem::separator(app)?)?;
+                application_menu.append(&MenuItem::with_id(
+                    app,
+                    MENU_UPDATE_AVAILABLE,
+                    format!("Update to version {version}"),
+                    true,
+                    None::<&str>,
+                )?)?;
+            }
             menu.append(&application_menu)?;
         }
         menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -928,11 +1186,16 @@ fn show_context_menu(app: &AppHandle, auth: &AuthState) {
             true,
             None::<&str>,
         )?)?;
+        let is_premium_member = auth.logged_in && auth.is_premium;
         menu.append(&MenuItem::with_id(
             app,
             MENU_BECOME_PREMIUM,
-            "Become a premium supporter",
-            true,
+            if is_premium_member {
+                "Thank you for supporting the project!"
+            } else {
+                "Become a premium supporter"
+            },
+            !is_premium_member,
             None::<&str>,
         )?)?;
         menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -1120,7 +1383,10 @@ fn normalized_username(username: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_topmost, normalized_username, MAX_USERNAME_CHARS};
+    use super::{
+        corrected_window_position, effective_topmost, is_sufficiently_visible, normalized_username,
+        should_start_in_background, ScreenRect, MAX_USERNAME_CHARS,
+    };
     #[cfg(windows)]
     use super::{
         is_valid_process_name, windows_startup_command, PersistedWindowTracking, AUTOSTART_ARGUMENT,
@@ -1156,6 +1422,66 @@ mod tests {
         assert!(effective_topmost(true, false, false));
         assert!(!effective_topmost(false, false, true));
         assert!(!effective_topmost(false, true, true));
+    }
+
+    #[test]
+    fn a_manual_launch_wins_over_an_in_progress_autostart_launch() {
+        assert!(should_start_in_background(true, false));
+        assert!(!should_start_in_background(true, true));
+        assert!(!should_start_in_background(false, false));
+    }
+
+    fn screen_rect(x: i32, y: i32, width: u32, height: u32) -> ScreenRect {
+        ScreenRect::from_position_size(x, y, width, height)
+    }
+
+    #[test]
+    fn a_compact_but_usable_portion_counts_as_visible() {
+        let work_area = screen_rect(0, 0, 1920, 1040);
+        let horizontal = screen_rect(1800, 100, 900, 20);
+        let vertical = screen_rect(100, 1000, 20, 500);
+
+        assert!(is_sufficiently_visible(horizontal, work_area));
+        assert!(!is_sufficiently_visible(vertical, work_area));
+    }
+
+    #[test]
+    fn visibility_on_any_monitor_keeps_the_current_position() {
+        let work_areas = [
+            screen_rect(-1920, 0, 1920, 1040),
+            screen_rect(0, 0, 1920, 1040),
+        ];
+        let window = screen_rect(-100, 100, 900, 75);
+
+        assert_eq!(corrected_window_position(window, &work_areas), None);
+    }
+
+    #[test]
+    fn mostly_offscreen_window_is_clamped_into_the_nearest_work_area() {
+        let work_areas = [
+            screen_rect(0, 0, 1920, 1040),
+            screen_rect(1920, 0, 1920, 1040),
+        ];
+        let window = screen_rect(3800, 100, 900, 75);
+
+        assert_eq!(
+            corrected_window_position(window, &work_areas),
+            Some((2940, 100))
+        );
+    }
+
+    #[test]
+    fn entirely_detached_window_moves_to_the_closest_monitor() {
+        let work_areas = [
+            screen_rect(-1920, 0, 1920, 1040),
+            screen_rect(0, 0, 1920, 1040),
+        ];
+        let window = screen_rect(-3000, 120, 900, 75);
+
+        assert_eq!(
+            corrected_window_position(window, &work_areas),
+            Some((-1920, 120))
+        );
     }
 
     #[cfg(windows)]
