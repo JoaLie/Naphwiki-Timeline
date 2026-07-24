@@ -92,7 +92,14 @@ const VERSION_HISTORY_HTML: &str = r##"<!doctype html>
   </header>
   <main>
     <article class="current">
-      <h2>Version 0.2.3 <span class="badge">Current</span></h2>
+      <h2>Version 0.2.4 <span class="badge">Current</span></h2>
+      <ul>
+        <li>Added Alt-drag navigation for browsing backward and forward through the timeline.</li>
+        <li>Added a return-to-current-time control with a smooth animated snap back.</li>
+      </ul>
+    </article>
+    <article>
+      <h2>Version 0.2.3</h2>
       <ul>
         <li>Improved startup recovery, remembered manually attached windows, and restored timelines that open outside the visible monitor area.</li>
         <li>Added an update action to the context menu while a newer version is available.</li>
@@ -588,7 +595,7 @@ const WINDOW_INTEGRATION_SCRIPT: &str = r#"
   }
 
   window.addEventListener('mousedown', function (e) {
-    if (e.button !== 0 || !window.__TAURI__) return;
+    if (e.button !== 0 || e.altKey || !window.__TAURI__) return;
     var target = e.target instanceof Element ? e.target : null;
     if (target && target.closest(DRAG_EXCLUSION_SELECTOR)) return;
     e.preventDefault();
