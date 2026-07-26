@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "timeline-settings-window",
+  "description": "Allow the Naphwiki timeline settings page to save app-only settings and request a timeline refresh",
+  "windows": ["timeline-settings"],
+  "remote": {
+    "urls": ["https://www.naphwiki.com"]
+  },
+  "local": true,
+  "permissions": ["core:event:allow-emit"]
+}

@@ -23,6 +23,7 @@ use winreg::{
     RegKey, RegValue,
 };
 
+mod notification_sound;
 #[cfg(windows)]
 mod window_tracking;
 
@@ -92,7 +93,14 @@ const VERSION_HISTORY_HTML: &str = r##"<!doctype html>
   </header>
   <main>
     <article class="current">
-      <h2>Version 0.2.4 <span class="badge">Current</span></h2>
+      <h2>Version 0.2.5 <span class="badge">Current</span></h2>
+      <ul>
+        <li>Added custom notification sounds with native file selection and an in-app preview.</li>
+        <li>Custom sounds are stored locally and automatically fall back to the default alert if they cannot be played.</li>
+      </ul>
+    </article>
+    <article>
+      <h2>Version 0.2.4</h2>
       <ul>
         <li>Added Alt-drag navigation for browsing backward and forward through the timeline.</li>
         <li>Added a return-to-current-time control with a smooth animated snap back.</li>
@@ -712,6 +720,12 @@ pub fn run() {
     builder
         .manage(WindowTracking::default())
         .manage(AvailableUpdate::default())
+        .invoke_handler(tauri::generate_handler![
+            notification_sound::get_custom_notification_sound_info,
+            notification_sound::read_custom_notification_sound,
+            notification_sound::select_custom_notification_sound,
+            notification_sound::clear_custom_notification_sound
+        ])
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

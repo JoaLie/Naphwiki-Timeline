@@ -60,6 +60,9 @@ storage are kept there as well, like browser data.
   opens a normal-sized login window, and your customized timeline (hidden
   events, custom events, notification settings) loads into the strip once it
   completes. The session persists across restarts in the webview profile.
+- Notification settings can use the built-in alert or a custom MP3, WAV, OGG,
+  OPUS, M4A, AAC, or FLAC file. Custom sounds are copied to the app's local
+  data folder and can be previewed or reset from the in-app settings window.
 
 ## Install
 
